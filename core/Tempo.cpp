@@ -153,4 +153,94 @@ BeatGrid estimateBeatGrid (const OnsetFunction& of, const std::vector<Onset>& on
     return grid;
 }
 
+void refineGridWithHits (BeatGrid& grid, const std::vector<Hit>& hits, const std::vector<Onset>& onsets)
+{
+    if (grid.bpm <= 0.0 || onsets.empty())
+        return;
+
+    // 1. Tempo octave from the loud snares.
+    std::vector<double> snares;
+    for (const auto& h : hits)
+        if (h.instrument == Instrument::Snare && h.velocity >= 0.5f)
+            snares.push_back (h.time);
+
+    if (snares.size() >= 4)
+    {
+        std::vector<double> gaps;
+        for (size_t i = 1; i < snares.size(); ++i)
+            if (snares[i] - snares[i - 1] < 3.0)
+                gaps.push_back (snares[i] - snares[i - 1]);
+
+        // Only a steady backbeat counts: most gaps the same number
+        // of beats. And only for tempos that are easy to get wrong: a slow
+        // groove read twice too fast (130+), or a fast one read at half
+        // speed (under 80). In between, a snare on every beat or every 4
+        // beats is usually the real groove (or half-time feel).
+        const double beat = grid.beatSeconds();
+        auto share = [&] (double beats)
+        {
+            int n = 0;
+            for (double g : gaps)
+                n += std::abs (g / beat - beats) < 0.12 * beats ? 1 : 0;
+            return gaps.empty() ? 0.0 : (double) n / (double) gaps.size();
+        };
+
+        if (gaps.size() >= 3)
+        {
+            if (grid.bpm < 80.0 && share (1.0) >= 0.5)
+                grid.bpm *= 2.0;            // snare on every beat: we found half the tempo
+            else if (grid.bpm >= 130.0 && share (4.0) >= 0.5)
+                grid.bpm *= 0.5;            // snare every 4 beats: we found twice the tempo
+        }
+    }
+
+    // 2. Bar 1: try every loud kick (and the first hit) as the "1" and keep
+    // the one where kicks fall on 1 (or 3) and snares on 2 and 4. Close
+    // calls go to the earliest, recordings almost always start on a "1".
+    const double beat = grid.beatSeconds();
+    const int perBar = grid.timeSignature.beatsPerBar;
+    const double firstHit = onsets.front().time, lastHit = onsets.back().time;
+
+    std::vector<double> candidates { firstHit };
+    for (const auto& h : hits)
+        if (h.instrument == Instrument::Kick && h.velocity >= 0.5f && h.time < firstHit + 2.0 * perBar * beat)
+            candidates.push_back (h.time);
+
+    double bestAnchor = grid.firstDownbeat, bestScore = -1.0;
+    bool any = false;
+    for (double anchor : candidates)
+    {
+        double score = 0.0;
+        for (const auto& h : hits)
+        {
+            const bool isKick = h.instrument == Instrument::Kick, isSnare = h.instrument == Instrument::Snare;
+            if (! isKick && ! isSnare)
+                continue;
+            const double u = (h.time - anchor) / beat;
+            const double k = std::round (u);
+            if (std::abs (u - k) > 0.12)
+                continue;
+            const int inBar = (((int) k % perBar) + perBar) % perBar;
+            if (isKick)
+                score += h.velocity * (inBar == 0 ? 1.0 : inBar == perBar / 2 ? 0.6 : 0.15);
+            else
+                score += h.velocity * (inBar % 2 == 1 ? 1.0 : 0.1);
+        }
+        any = any || score > 0.0;
+        if (score > bestScore * 1.03)   // candidates come earliest first
+        {
+            bestScore = score;
+            bestAnchor = anchor;
+        }
+    }
+
+    if (any)
+    {
+        const double bar = perBar * beat;
+        grid.firstDownbeat = bestAnchor - std::floor ((bestAnchor - firstHit + 0.05) / bar) * bar;
+        grid.firstBeat = grid.firstDownbeat - std::floor ((grid.firstDownbeat - firstHit + 0.05) / beat) * beat;
+    }
+    grid.bars = std::max (1, (int) std::ceil ((lastHit - grid.firstDownbeat + 0.05) / (perBar * beat)));
+}
+
 } // namespace drb

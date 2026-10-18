@@ -21,4 +21,10 @@ struct BeatGrid
 
 BeatGrid estimateBeatGrid (const OnsetFunction&, const std::vector<Onset>&);
 
+// Second pass once the instruments are known: fixes a tempo found twice too
+// fast or too slow (the snare normally comes every 2 beats), and puts bar 1
+// where kick and snare fit the usual pattern best (kick on 1, snare on 2
+// and 4).
+void refineGridWithHits (BeatGrid&, const std::vector<Hit>&, const std::vector<Onset>&);
+
 } // namespace drb

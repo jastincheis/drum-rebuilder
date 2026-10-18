@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "MidiEditorView.h"
 #include "Theme.h"
 
 #include <cmath>
@@ -307,14 +308,232 @@ private:
     bool playheadWasMoving = false;
 };
 
+// --- Checking the instruments --------------------------------------------
+
+// "Is this the Kick?" for each instrument found: listen to just its hits,
+// then Yes (it is), No (fix it, then listen again) or Next. Stage 3 makes the
+// folders of original sounds from the instruments marked Yes.
+class CheckPanel : public juce::Component, private juce::Timer
+{
+public:
+    explicit CheckPanel (DrumRebuilderProcessor& p) : processor (p)
+    {
+        for (auto* b : { &listenButton, &yesButton, &noButton, &nextButton })
+        {
+            b->setWantsKeyboardFocus (false);
+            addAndMakeVisible (b);
+        }
+        listenButton.onClick = [this]
+        {
+            if (processor.isAuditioning())
+                processor.stopAudition();
+            else if (auto i = current())
+                processor.auditionInstrument (*i);
+        };
+        yesButton.onClick = [this] { answer (1); };
+        noButton.onClick = [this] { answer (2); };
+        nextButton.onClick = [this] { go (step + 1, false); };
+
+        setupLabel (question, theme::text, 17.0f);
+        setupLabel (help, theme::textDim, 13.0f);
+        addAndMakeVisible (question);
+        addAndMakeVisible (help);
+        startTimerHz (10);
+    }
+
+    std::function<void (std::optional<drb::Instrument>)> onFocus;
+
+    void update()
+    {
+        // The instruments to check: the ones with hits.
+        found.clear();
+        for (auto inst : { drb::Instrument::Kick, drb::Instrument::Snare, drb::Instrument::HiHatClosed, drb::Instrument::HiHatOpen })
+            if (count (inst) > 0)
+                found.push_back (inst);
+
+        if (processor.getLoadedId() != shownId)
+        {
+            shownId = processor.getLoadedId();
+            step = 0;
+            for (size_t k = 0; k < found.size(); ++k)   // carry on where we left off
+                if (processor.getCheck (found[k]) == 0)
+                {
+                    step = (int) k;
+                    break;
+                }
+        }
+        step = juce::jlimit (0, std::max (0, (int) found.size()), step);
+        refreshTexts();
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (theme::panel);
+        g.fillRoundedRectangle (getLocalBounds().toFloat(), 6.0f);
+
+        // One chip per instrument: its name and count, green when OK, red
+        // when wrong; the current one outlined.
+        chips.clear();
+        auto row = getLocalBounds().reduced (10, 6).removeFromTop (24);
+        g.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+        g.setColour (theme::textDim);
+        g.drawText ("Check the instruments:", row.removeFromLeft (160), juce::Justification::centredLeft);
+        for (size_t k = 0; k < found.size(); ++k)
+        {
+            const auto inst = found[k];
+            const int state = processor.getCheck (inst);
+            const juce::String text = juce::String (drb::instrumentName (inst)) + " (" + juce::String (count (inst)) + ")"
+                                    + (state == 1 ? "  OK" : state == 2 ? "  wrong" : "");
+            const int w = juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), text) + 22;
+            const auto chip = row.removeFromLeft (w).reduced (0, 1);
+            row.removeFromLeft (8);
+            chips.push_back (chip);
+
+            const auto colour = state == 1 ? juce::Colour (0xff3d8b4f) : state == 2 ? juce::Colour (0xffa33a3a) : theme::panelLight;
+            g.setColour (colour);
+            g.fillRoundedRectangle (chip.toFloat(), 11.0f);
+            if ((int) k == step)
+            {
+                g.setColour (theme::instrument (inst));
+                g.drawRoundedRectangle (chip.toFloat().reduced (0.5f), 11.0f, 2.0f);
+            }
+            g.setColour (theme::text);
+            g.drawText (text, chip, juce::Justification::centred);
+        }
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (10, 6);
+        r.removeFromTop (30);
+        auto row = r.removeFromTop (30);
+        question.setBounds (row.removeFromLeft (std::min (330, row.getWidth() / 3)));
+        listenButton.setBounds (row.removeFromLeft (84).reduced (0, 1));
+        row.removeFromLeft (8);
+        yesButton.setBounds (row.removeFromLeft (150).reduced (0, 1));
+        row.removeFromLeft (6);
+        noButton.setBounds (row.removeFromLeft (130).reduced (0, 1));
+        row.removeFromLeft (6);
+        nextButton.setBounds (row.removeFromLeft (70).reduced (0, 1));
+        row.removeFromLeft (14);
+        help.setBounds (row);
+    }
+
+    void mouseUp (const juce::MouseEvent& e) override
+    {
+        for (size_t k = 0; k < chips.size(); ++k)
+            if (chips[k].contains (e.getPosition()))
+                go ((int) k, processor.isAuditioning());
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    std::vector<drb::Instrument> found;
+    std::vector<juce::Rectangle<int>> chips;
+    int step = 0, shownId = -1;
+    bool wasAuditioning = false;
+    juce::Label question, help;
+    juce::TextButton listenButton { "Listen" }, yesButton { "Yes" }, noButton { "No, it's wrong" }, nextButton { "Next" };
+
+    std::optional<drb::Instrument> current() const
+    {
+        return juce::isPositiveAndBelow (step, (int) found.size()) ? std::optional (found[(size_t) step]) : std::nullopt;
+    }
+
+    int count (drb::Instrument inst) const
+    {
+        int n = 0;
+        for (const auto& h : processor.getAnalysis().hits)
+            n += h.instrument == inst ? 1 : 0;
+        return n;
+    }
+
+    void go (int newStep, bool listen)
+    {
+        step = juce::jlimit (0, (int) found.size(), newStep);
+        if (auto i = current(); i && listen)
+            processor.auditionInstrument (*i);
+        else
+            processor.stopAudition();
+        refreshTexts();
+        repaint();
+    }
+
+    // Yes: on to the next instrument, already playing. No: stay, with what
+    // to do about it.
+    void answer (int state)
+    {
+        if (auto i = current())
+        {
+            processor.setCheck (*i, state);
+            if (state == 1)
+                go (step + 1, true);
+            else
+                refreshTexts();
+        }
+    }
+
+    void refreshTexts()
+    {
+        const bool loaded = processor.getLoaded() != nullptr && ! found.empty();
+        const auto inst = current();
+        for (auto* b : { &listenButton, &yesButton, &noButton, &nextButton })
+            b->setVisible (loaded && inst.has_value());
+
+        if (! loaded)
+        {
+            question.setText ({}, juce::dontSendNotification);
+            help.setText ({}, juce::dontSendNotification);
+        }
+        else if (inst)
+        {
+            question.setText ("Is this the " + juce::String (drb::instrumentName (*inst)) + "?", juce::dontSendNotification);
+            question.setColour (juce::Label::textColourId, theme::instrument (*inst));
+            yesButton.setButtonText ("Yes, it's the " + juce::String (drb::instrumentName (*inst)).upToFirstOccurrenceOf (" ", false, false));
+            listenButton.setButtonText (processor.isAuditioning() ? "Stop" : "Listen");
+            help.setText (processor.getCheck (*inst) == 2
+                              ? "Fix it: click the wrong markers and pick what they really are (the likeliest is at the top), then Listen again."
+                              : "Listen plays only these hits, cut from your beat, in their own rhythm.",
+                          juce::dontSendNotification);
+        }
+        else
+        {
+            bool allOk = true;
+            for (auto f : found)
+                allOk = allOk && processor.getCheck (f) == 1;
+            question.setText (allOk ? "All instruments checked" : "Done - some are marked wrong", juce::dontSendNotification);
+            question.setColour (juce::Label::textColourId, allOk ? juce::Colour (0xff7ee081) : theme::text);
+            help.setText (allOk ? "Next (stage 3): a folder for each instrument with its original sounds from this beat."
+                                : "Click an instrument above to check it again.",
+                          juce::dontSendNotification);
+        }
+
+        // The other instruments' markers fade only while listening.
+        if (onFocus)
+            onFocus (processor.isAuditioning() ? inst : std::nullopt);
+    }
+
+    void timerCallback() override
+    {
+        if (processor.isAuditioning() != wasAuditioning)
+        {
+            wasAuditioning = processor.isAuditioning();
+            refreshTexts();
+        }
+    }
+};
+
 // --- Analysis ------------------------------------------------------------
 
 class AnalysisPage : public juce::Component
 {
 public:
-    explicit AnalysisPage (DrumRebuilderProcessor& p) : processor (p), waveform (p)
+    explicit AnalysisPage (DrumRebuilderProcessor& p) : processor (p), waveform (p), check (p)
     {
         addAndMakeVisible (waveform);
+        addAndMakeVisible (check);
+        check.onFocus = [this] (std::optional<drb::Instrument> i) { waveform.setFocus (i); };
         for (auto* b : { &zoomOut, &zoomIn, &fit })
         {
             b->setWantsKeyboardFocus (false);
@@ -326,7 +545,7 @@ public:
 
         setupLabel (info, theme::text);
         setupLabel (hint, theme::textDim, 12.5f);
-        hint.setText ("Click: play from there   Double-click: one hit   Drag: region   Right-click: bar 1   Wheel, Up / Down: zoom   Left / Right: hits   Space: play   W / E: start / end",
+        hint.setText ("Click a marker: what it really is   Click: play from there   Double-click: one hit   Drag: region   Right-click: more   Wheel, Up / Down: zoom   Left / Right: hits   Space: play   W / E: start / end",
                       juce::dontSendNotification);
         hint.setJustificationType (juce::Justification::centredRight);
         addAndMakeVisible (info);
@@ -336,6 +555,7 @@ public:
     void update()
     {
         waveform.refresh();
+        check.update();
         const auto& a = processor.getAnalysis();
         juce::String text;
         if (processor.getLoaded() != nullptr)
@@ -357,6 +577,8 @@ public:
         auto r = getLocalBounds().reduced (8);
         auto bottom = r.removeFromBottom (30);
         r.removeFromBottom (6);
+        check.setBounds (r.removeFromTop (72));
+        r.removeFromTop (6);
         waveform.setBounds (r);
 
         for (auto* b : { &zoomOut, &zoomIn, &fit })
@@ -374,8 +596,218 @@ public:
 private:
     DrumRebuilderProcessor& processor;
     WaveformView waveform;
+    CheckPanel check;
     juce::TextButton zoomOut { "-" }, zoomIn { "+" }, fit { "Fit" };
     juce::Label info, hint;
+};
+
+// --- MIDI Editor ---------------------------------------------------------
+
+class MidiEditorPage : public juce::Component
+{
+public:
+    explicit MidiEditorPage (DrumRebuilderProcessor& p) : processor (p), view (p)
+    {
+        addAndMakeVisible (view);
+
+        setupLabel (gridLabel, theme::textDim);
+        gridLabel.setText ("Grid", juce::dontSendNotification);
+        addAndMakeVisible (gridLabel);
+        const auto& divisions = drb::gridDivisions();
+        for (size_t i = 0; i < divisions.size(); ++i)
+            gridBox.addItem (divisions[i].name, (int) i + 1);
+        gridBox.setSelectedId (3, juce::dontSendNotification);   // 1/16
+        gridBox.onChange = [this] { view.setDivision (division()); };
+        gridBox.setWantsKeyboardFocus (false);
+        addAndMakeVisible (gridBox);
+
+        snapButton.setToggleState (true, juce::dontSendNotification);
+        snapButton.setTooltip ("New and moved hits land on the grid (hold Alt for off the grid)");
+        snapButton.onClick = [this] { view.setSnap (snapButton.getToggleState()); };
+        addAndMakeVisible (snapButton);
+
+        strength.setRange (0.0, 100.0, 1.0);
+        strength.setValue (100.0, juce::dontSendNotification);
+        strength.setTextValueSuffix (" %");
+        strength.setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 22);
+        strength.setTooltip ("How far Quantize moves the hits: 100 % = onto the grid, 50 % = halfway (keeps some groove)");
+        strength.setWantsKeyboardFocus (false);
+        strength.setColour (juce::Slider::backgroundColourId, theme::panelLight);
+        strength.setColour (juce::Slider::trackColourId, theme::accent.withAlpha (0.7f));
+        addAndMakeVisible (strength);
+
+        for (auto* b : { &quantizeButton, &undoButton, &redoButton, &zoomOut, &zoomIn, &fit })
+        {
+            b->setWantsKeyboardFocus (false);
+            addAndMakeVisible (b);
+        }
+        quantizeButton.setTooltip ("Move every hit towards the grid");
+        quantizeButton.onClick = [this] { processor.quantizeHits (division(), strength.getValue() / 100.0); };
+        undoButton.onClick = [this] { processor.undo(); };
+        redoButton.onClick = [this] { processor.redo(); };
+        zoomIn.onClick = [this] { view.zoomBy (2.0, view.zoomCentre()); };
+        zoomOut.onClick = [this] { view.zoomBy (0.5, view.zoomCentre()); };
+        fit.onClick = [this] { view.zoomToFit(); };
+
+        setupLabel (hint, theme::textDim, 12.5f);
+        hint.setText ("Click an empty spot: add a hit    Drag: move it (onto another row: change the instrument, Alt: off the grid)"
+                      "    Double-click or Delete: remove    Right-click: how hard    Ctrl+Z: undo",
+                      juce::dontSendNotification);
+        addAndMakeVisible (hint);
+        update();
+    }
+
+    void update()
+    {
+        view.refresh();
+        undoButton.setEnabled (processor.canUndo());
+        redoButton.setEnabled (processor.canRedo());
+        quantizeButton.setEnabled (processor.getLoaded() != nullptr && processor.getAnalysis().grid.bpm > 0.0);
+    }
+
+    MidiEditorView& getView() { return view; }
+
+    void paint (juce::Graphics& g) override { g.fillAll (theme::background); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (8);
+        auto bar = r.removeFromTop (30);
+        r.removeFromTop (6);
+        hint.setBounds (r.removeFromBottom (22));
+        r.removeFromBottom (4);
+        view.setBounds (r);
+
+        gridLabel.setBounds (bar.removeFromLeft (36));
+        gridBox.setBounds (bar.removeFromLeft (80).reduced (0, 2));
+        bar.removeFromLeft (8);
+        snapButton.setBounds (bar.removeFromLeft (70));
+        bar.removeFromLeft (16);
+        quantizeButton.setBounds (bar.removeFromLeft (84).reduced (0, 1));
+        bar.removeFromLeft (6);
+        strength.setBounds (bar.removeFromLeft (190));
+        bar.removeFromLeft (16);
+        undoButton.setBounds (bar.removeFromLeft (60).reduced (0, 1));
+        bar.removeFromLeft (4);
+        redoButton.setBounds (bar.removeFromLeft (60).reduced (0, 1));
+
+        fit.setBounds (bar.removeFromRight (52).reduced (0, 1));
+        bar.removeFromRight (4);
+        zoomIn.setBounds (bar.removeFromRight (34).reduced (0, 1));
+        bar.removeFromRight (4);
+        zoomOut.setBounds (bar.removeFromRight (34).reduced (0, 1));
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    MidiEditorView view;
+    juce::Label gridLabel, hint;
+    juce::ComboBox gridBox;
+    juce::ToggleButton snapButton { "Snap" };
+    juce::Slider strength { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::TextButton quantizeButton { "Quantize" }, undoButton { "Undo" }, redoButton { "Redo" };
+    juce::TextButton zoomOut { "-" }, zoomIn { "+" }, fit { "Fit" };
+
+    double division() const
+    {
+        const auto& divisions = drb::gridDivisions();
+        return divisions[(size_t) juce::jlimit (0, (int) divisions.size() - 1, gridBox.getSelectedId() - 1)].beats;
+    }
+};
+
+// --- Export --------------------------------------------------------------
+
+class ExportPage : public juce::Component
+{
+public:
+    explicit ExportPage (DrumRebuilderProcessor& p) : processor (p)
+    {
+        midiButton.setWantsKeyboardFocus (false);
+        midiButton.onClick = [this] { exportMidi(); };
+        addAndMakeVisible (midiButton);
+
+        setupLabel (title, theme::text, 18.0f);
+        title.setText ("MIDI", juce::dontSendNotification);
+        setupLabel (info, theme::text, 14.0f);
+        info.setJustificationType (juce::Justification::topLeft);
+        setupLabel (result, theme::accent, 14.0f);
+        setupLabel (later, theme::textDim, 14.0f);
+        later.setJustificationType (juce::Justification::topLeft);
+        later.setText ("Stereo WAV of the rebuilt beat - stage 3\nStems, one WAV per instrument with the Reverb and Delay tails - stage 5",
+                       juce::dontSendNotification);
+        for (auto* l : { &title, &info, &result, &later })
+            addAndMakeVisible (l);
+        update();
+    }
+
+    void update()
+    {
+        const auto& a = processor.getAnalysis();
+        juce::String text;
+        if (processor.getLoaded() == nullptr)
+            text = "Open a drums-only recording first.";
+        else
+        {
+            text << "One track per instrument, General MIDI drum notes (kick 36, snare 38, hi-hats 42 / 46) on channel 10,\n"
+                 << "at " << juce::String (a.grid.bpm, 1) << " BPM, starting at bar 1 (one bar earlier if hits come before it).\n"
+                 << "The hits go out exactly as they are now: quantize them in the MIDI Editor first if you want them on the grid.\n\n";
+            for (auto inst : drb::allInstruments)
+            {
+                int n = 0;
+                for (const auto& h : a.hits)
+                    n += h.instrument == inst ? 1 : 0;
+                if (n > 0)
+                    text << drb::instrumentName (inst) << ": " << n << "    ";
+            }
+        }
+        info.setText (text, juce::dontSendNotification);
+        midiButton.setEnabled (processor.getLoaded() != nullptr && ! a.hits.empty());
+    }
+
+    void paint (juce::Graphics& g) override { g.fillAll (theme::background); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (24);
+        title.setBounds (r.removeFromTop (28));
+        r.removeFromTop (6);
+        info.setBounds (r.removeFromTop (100));
+        r.removeFromTop (8);
+        auto row = r.removeFromTop (32);
+        midiButton.setBounds (row.removeFromLeft (150));
+        row.removeFromLeft (12);
+        result.setBounds (row);
+        r.removeFromTop (40);
+        later.setBounds (r.removeFromTop (60));
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    juce::TextButton midiButton { "Export MIDI..." };
+    juce::Label title, info, result, later;
+    std::unique_ptr<juce::FileChooser> chooser;
+
+    void exportMidi()
+    {
+        const auto* l = processor.getLoaded();
+        if (l == nullptr)
+            return;
+        const auto suggested = l->file.getParentDirectory().getChildFile (l->file.getFileNameWithoutExtension() + " drums.mid");
+        chooser = std::make_unique<juce::FileChooser> ("Save the drums as MIDI", suggested, "*.mid");
+        juce::Component::SafePointer<ExportPage> self (this);
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                                  | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [self] (const juce::FileChooser& fc)
+                              {
+                                  if (self == nullptr || fc.getResult() == juce::File())
+                                      return;
+                                  auto file = fc.getResult().withFileExtension ("mid");
+                                  const auto& a = self->processor.getAnalysis();
+                                  const bool ok = drb::writeMidiFile (file, a.hits, a.grid);
+                                  self->result.setText (ok ? "Saved " + file.getFileName() : "Could not save " + file.getFullPathName(),
+                                                        juce::dontSendNotification);
+                              });
+    }
 };
 
 // --- Editor --------------------------------------------------------------
@@ -431,15 +863,17 @@ DrumRebuilderEditor::DrumRebuilderEditor (DrumRebuilderProcessor& p)
 
     tabs.addTab ("Import", theme::panel, importPage, true);
     tabs.addTab ("Analysis", theme::panel, analysisPage, true);
+    midiPage = new MidiEditorPage (processor);
+    tabs.addTab ("MIDI Editor", theme::panel, midiPage, true);
     const std::pair<const char*, const char*> later[] {
-        { "MIDI Editor",    "One lane per instrument, editable - stage 2" },
         { "Sample Browser", "Your sample folders, one per instrument - stage 3" },
         { "Drum Rack",      "Volume, pan, pitch, mute, solo, Reverb and Delay per instrument - stages 3 and 5" },
         { "Master",         "Master Reverb and Delay, A/B with the original - stages 3 and 5" },
-        { "Export",         "MIDI, stereo WAV and stems - stages 2, 3 and 5" },
     };
     for (const auto& [name, stage] : later)
         tabs.addTab (name, theme::panel, new Placeholder (name, stage), true);
+    exportPage = new ExportPage (processor);
+    tabs.addTab ("Export", theme::panel, exportPage, true);
     tabs.setTabBarDepth (32);
     tabs.setOutline (0);
     addAndMakeVisible (tabs);
@@ -503,6 +937,21 @@ void DrumRebuilderEditor::resized()
 bool DrumRebuilderEditor::keyPressed (const juce::KeyPress& key)
 {
     const bool onImport = tabs.getCurrentContentComponent() == importPage;
+    const bool onMidi = tabs.getCurrentContentComponent() == midiPage;
+
+    // Ctrl / Cmd + Z: undo the last change to the hits; + Shift, or Y: redo.
+    if (key.getModifiers().isCommandDown())
+    {
+        const auto k = juce::CharacterFunctions::toLowerCase ((juce::juce_wchar) key.getKeyCode());
+        if (k == 'z' && ! key.getModifiers().isShiftDown())
+            processor.undo();
+        else if (k == 'z' || k == 'y')
+            processor.redo();
+        else
+            return false;
+        return true;
+    }
+
     if (key == juce::KeyPress::spaceKey)
     {
         if (! (onImport && importPage->togglePreview()))
@@ -532,9 +981,15 @@ bool DrumRebuilderEditor::keyPressed (const juce::KeyPress& key)
     // Up / down: zoom in / out, around the playhead when it is in view.
     if (! onImport && (key == juce::KeyPress::upKey || key == juce::KeyPress::downKey))
     {
-        tabs.setCurrentTabIndex (1);
-        auto& w = analysisPage->getWaveform();
-        w.zoomBy (key == juce::KeyPress::upKey ? 2.0 : 0.5, w.zoomCentre());
+        const double factor = key == juce::KeyPress::upKey ? 2.0 : 0.5;
+        if (onMidi)
+            midiPage->getView().zoomBy (factor, midiPage->getView().zoomCentre());
+        else
+        {
+            tabs.setCurrentTabIndex (1);
+            auto& w = analysisPage->getWaveform();
+            w.zoomBy (factor, w.zoomCentre());
+        }
         return true;
     }
     return false;
@@ -573,6 +1028,7 @@ void DrumRebuilderEditor::togglePlay()
     else
     {
         processor.stopPreview();
+        processor.stopAudition();
         player.play();
     }
     updateHeader();
@@ -613,6 +1069,8 @@ void DrumRebuilderEditor::changeListenerCallback (juce::ChangeBroadcaster*)
     updateHeader();
     importPage->update();
     analysisPage->update();
+    midiPage->update();
+    exportPage->update();
 
     if (processor.getLoadedId() != shownId)
     {

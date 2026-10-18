@@ -5,6 +5,8 @@
 
 class ImportPage;
 class AnalysisPage;
+class MidiEditorPage;
+class ExportPage;
 
 class DrumRebuilderEditor : public juce::AudioProcessorEditor,
                             public juce::FileDragAndDropTarget,
@@ -39,6 +41,8 @@ private:
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     ImportPage* importPage = nullptr;       // owned by tabs
     AnalysisPage* analysisPage = nullptr;   // owned by tabs
+    MidiEditorPage* midiPage = nullptr;     // owned by tabs
+    ExportPage* exportPage = nullptr;       // owned by tabs
 
     std::unique_ptr<juce::FileChooser> chooser;
     int shownId = -1;

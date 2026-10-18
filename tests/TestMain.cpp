@@ -5,7 +5,9 @@
 //   drb_tests --write <dir>   also save each beat as WAV + its hits as CSV, to listen to
 
 #include "Analyzer.h"
+#include "AudioFile.h"
 #include "Metronome.h"
+#include "Midi.h"
 #include "Player.h"
 #include "Evaluation.h"
 #include "SyntheticDrums.h"
@@ -14,6 +16,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <map>
 #include <set>
 
 using namespace drb;
@@ -69,6 +73,55 @@ void checkBasics()
 }
 
 // The player, driven like the audio thread would: blocks of 512 at 48 kHz.
+// Quantize and MIDI export.
+void checkMidi()
+{
+    BeatGrid grid;
+    grid.bpm = 120.0;          // beat 0.5 s, bar 2 s
+    grid.firstDownbeat = 1.0;
+    grid.firstBeat = 0.0;
+
+    const std::vector<Hit> hits {
+        { 0.51, Instrument::HiHatClosed, 0.5f, 1.0f, false },   // pickup, beat 4 of bar 0 (+10 ms)
+        { 1.00, Instrument::Kick, 1.0f, 1.0f, false },
+        { 1.02, Instrument::HiHatClosed, 0.5f, 1.0f, false },
+        { 1.49, Instrument::Snare, 0.9f, 1.0f, false },         // beat 2, 10 ms early
+        { 1.63, Instrument::HiHatClosed, 0.5f, 1.0f, false },   // just after the 1/16 at 1.625
+    };
+
+    const auto full = quantize (hits, grid, 0.25, 1.0);
+    bool onGrid = true;
+    for (const auto& h : full)
+    {
+        const double steps = (h.time - 1.0) / 0.125;
+        onGrid = onGrid && std::abs (steps - std::round (steps)) < 1.0e-9;
+    }
+    check (onGrid && std::abs (full[3].time - 1.5) < 1.0e-9, "quantize 100 % puts every hit on the 1/16 grid");
+
+    const auto half = quantize (hits, grid, 0.25, 0.5);
+    check (std::abs (half[3].time - 1.495) < 1.0e-9, "quantize 50 % moves halfway");
+
+    const auto midi = makeMidiFile (hits, grid, 960);
+    // 1 conductor track + kick, snare, hat
+    bool ok = midi.getNumTracks() == 4;
+    double tempo = 0.0;
+    std::map<int, std::vector<double>> notes;
+    for (int t = 0; ok && t < midi.getNumTracks(); ++t)
+        for (const auto* e : *midi.getTrack (t))
+        {
+            if (e->message.isTempoMetaEvent())
+                tempo = 60.0 / e->message.getTempoSecondsPerQuarterNote();
+            if (e->message.isNoteOn())
+                notes[e->message.getNoteNumber()].push_back (e->message.getTimeStamp());
+        }
+    ok = ok && std::abs (tempo - 120.0) < 0.01;
+    // The pickup hat makes the file start one bar before bar 1 (at 4 beats = 3840 ticks).
+    ok = ok && notes[36].size() == 1 && std::abs (notes[36][0] - 3840.0) < 0.5;
+    ok = ok && notes[38].size() == 1 && std::abs (notes[38][0] - (3840.0 + 0.98 * 960.0)) < 0.5;
+    ok = ok && notes[42].size() == 3 && std::abs (notes[42][0] - 0.02 * 960.0 - 2880.0) < 0.5;
+    check (ok, "MIDI file: tempo, one track per instrument, GM notes, times, pickup bar");
+}
+
 // The metronome clicks exactly on the beats the player passes.
 void checkMetronome()
 {
@@ -219,7 +272,11 @@ void runAnalysis (const juce::File& writeDir)
 
         const auto result = analyse (beat.audio, spec.sampleRate);
         const auto r = test::evaluate (truthOf (beat), result);
-        auto f = [&] (Instrument i) { return r.instruments[(size_t) i].f(); };
+        auto f = [&] (Instrument i) { const auto& sc = r.instruments[(size_t) i]; return sc.truthCount() == 0 && sc.falsePositives == 0 ? 1.0 : sc.f(); };
+        if (std::getenv ("DRB_DETAIL") != nullptr)
+            for (auto i : { Instrument::Kick, Instrument::Snare, Instrument::HiHatClosed, Instrument::HiHatOpen })
+                std::printf ("    %-14s tp %3d  fp %3d  fn %3d\n", instrumentName (i), r.instruments[(size_t) i].truePositives,
+                             r.instruments[(size_t) i].falsePositives, r.instruments[(size_t) i].falseNegatives);
 
         std::printf ("%-18s %6.1f %8.2f %2d%-3s %5.1fms  %6.2f %5.1fms  %5.2f %5.2f %5.2f %5.2f%s\n",
                      spec.name.c_str(), spec.bpm, r.bpmDetected, result.grid.bars, r.barsCorrect ? "" : " X",
@@ -239,8 +296,43 @@ void runAnalysis (const juce::File& writeDir)
 }
 } // namespace
 
+// --analyse <file>: what the analysis finds in a real recording.
+int analyseFile (const juce::File& file)
+{
+    juce::String error;
+    const auto audio = loadAudioFile (file, error);
+    if (! audio)
+    {
+        std::printf ("%s\n", error.toRawUTF8());
+        return 1;
+    }
+
+    const auto r = analyse (audio->audio, audio->sampleRate);
+    std::printf ("%s\n%.1f BPM, %d bars, bar 1 at %.3f s, %d onsets, %d hits\n", file.getFileName().toRawUTF8(),
+                 r.grid.bpm, r.grid.bars, r.grid.firstDownbeat, (int) r.onsets.size(), (int) r.hits.size());
+    for (auto i : allInstruments)
+    {
+        int count = 0;
+        for (const auto& h : r.hits)
+            count += h.instrument == i ? 1 : 0;
+        if (count > 0)
+            std::printf ("  %-14s %d\n", instrumentName (i), count);
+    }
+
+    const double beat = r.grid.beatSeconds();
+    for (const auto& h : r.hits)
+        std::printf ("%8.3f  %6.2f  %-14s v %.2f  c %.2f\n", h.time,
+                     beat > 0.0 ? (h.time - r.grid.firstDownbeat) / beat : 0.0,
+                     instrumentName (h.instrument), h.velocity, h.confidence);
+    return 0;
+}
+
 int main (int argc, char** argv)
 {
+    for (int i = 1; i + 1 < argc; ++i)
+        if (juce::String (argv[i]) == "--analyse")
+            return analyseFile (juce::File::getCurrentWorkingDirectory().getChildFile (argv[i + 1]));
+
     juce::File writeDir;
     for (int i = 1; i + 1 < argc; ++i)
         if (juce::String (argv[i]) == "--write")
@@ -249,6 +341,7 @@ int main (int argc, char** argv)
     checkBasics();
     checkPlayer();
     checkMetronome();
+    checkMidi();
     runAnalysis (writeDir);
 
     std::printf ("%s (%d failed checks)\n", failures == 0 ? "OK" : "FAILED", failures);

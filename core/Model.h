@@ -42,6 +42,10 @@ struct Hit
     float velocity = 1.0f;       // 0..1, relative to the loudest hit of this instrument
     float confidence = 1.0f;     // 0..1, how sure the analysis is
     bool manual = false;         // placed or corrected by hand
+
+    // How much the sound at this time fits each instrument, 0..1, from the
+    // analysis (all 0 when unknown). Used to suggest what else it could be.
+    std::array<float, numInstruments> likeness {};
 };
 
 struct TimeSignature

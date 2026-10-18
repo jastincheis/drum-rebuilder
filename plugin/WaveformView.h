@@ -4,6 +4,8 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <optional>
+
 // The recording with its bar and beat grid, the detected hits, the selected
 // region and the playhead. Click = play from there, double-click = select the
 // hit under the mouse (up to the next one), drag = select a region, right
@@ -26,6 +28,9 @@ public:
     double centreSeconds() const { return (viewStart + viewEnd) * 0.5; }
     double zoomCentre() const;
     void scrollToShow (double seconds);   // keeps the zoom
+
+    // While checking an instrument: its markers stand out, the others fade.
+    void setFocus (std::optional<drb::Instrument> i) { focus = i; repaint(); }
 
     // Moves the playhead to the previous / next hit (direction -1 / +1).
     void jumpToHit (int direction);   // the playhead if it is in view, else the centre
@@ -62,6 +67,7 @@ private:
     Grab findGrab (juce::Point<int>, int& hitIndex) const;
     double snapToHit (double seconds, int ignoreIndex) const;
     double lastPlayhead = -1.0;
+    std::optional<drb::Instrument> focus;
 
     juce::Rectangle<int> waveArea() const;
     double xToSeconds (float x) const;
@@ -69,6 +75,7 @@ private:
     void setView (double start, double end);
     void buildPeaks();
     void showMenu (const juce::MouseEvent&);
+    void showRenameMenu (int hitIndex);
 
     void timerCallback() override;
     void scrollBarMoved (juce::ScrollBar*, double newRangeStart) override;

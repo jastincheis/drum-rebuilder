@@ -1,13 +1,14 @@
 #include "WaveformView.h"
 #include "Theme.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace
 {
 constexpr int rulerHeight = 18;
 constexpr int scrollHeight = 12;
-constexpr int markerHeight = 10;
+constexpr int markerHeight = 34;   // the triangle and up to two instrument names
 constexpr double minViewSeconds = 0.05;
 } // namespace
 
@@ -226,26 +227,63 @@ void WaveformView::paint (juce::Graphics& g)
         g.drawVerticalLine (area.getX() + x, mid - hi * halfH, mid - lo * halfH + 1.0f);
     }
 
-    // Detected hits: a thin line and a marker under the waveform, brighter
-    // for stronger hits.
+    // Hits: a thin line in the colour of the (first) instrument, a marker
+    // under the waveform and the instruments' names under it ("?" when the
+    // analysis is unsure). Stronger hits are brighter.
     float strongest = 0.0f;
     for (const auto& o : analysis.onsets)
         strongest = std::max (strongest, o.strength);
 
-    for (const auto& o : analysis.onsets)
+    const auto& onsets = analysis.onsets;
+    const auto& hits = analysis.hits;
+    size_t h = 0;
+    for (size_t i = 0; i < onsets.size(); ++i)
     {
+        const auto& o = onsets[i];
+        while (h < hits.size() && hits[h].time < o.time - 1.0e-9)
+            ++h;
         if (o.time < viewStart || o.time > viewEnd)
             continue;
+
+        std::vector<const drb::Hit*> here;
+        for (size_t k = h; k < hits.size() && hits[k].time < o.time + 1.0e-9; ++k)
+            here.push_back (&hits[k]);
+        std::sort (here.begin(), here.end(), [] (auto* a, auto* b) { return a->instrument < b->instrument; });
+
         const float x = secondsToX (o.time);
-        const bool grabbed = grab == Grab::hit && &o == &analysis.onsets[(size_t) grabbedHit];
-        const float a = grabbed ? 1.0f : 0.35f + 0.65f * (strongest > 0.0f ? o.strength / strongest : 1.0f);
-        g.setColour (theme::onset.withAlpha (a * 0.35f));
+        const bool grabbed = grab == Grab::hit && (int) i == grabbedHit;
+        const bool faded = focus.has_value()
+                        && std::none_of (here.begin(), here.end(), [this] (auto* hit) { return hit->instrument == *focus; });
+        const float a = grabbed ? 1.0f : faded ? 0.18f : 0.45f + 0.55f * (strongest > 0.0f ? o.strength / strongest : 1.0f);
+        const auto colour = here.empty() ? theme::onset : theme::instrument (here.front()->instrument);
+
+        g.setColour (colour.withAlpha (a * 0.4f));
         g.drawVerticalLine ((int) x, (float) area.getY(), (float) area.getBottom());
-        g.setColour (grabbed ? juce::Colours::white : theme::onset.withAlpha (a));
+        g.setColour (grabbed ? juce::Colours::white : colour.withAlpha (a));
         juce::Path tri;
         const float y = (float) area.getBottom() + 1.0f;
-        tri.addTriangle (x, y, x - 4.0f, y + markerHeight - 2, x + 4.0f, y + markerHeight - 2);
+        tri.addTriangle (x, y, x - 4.0f, y + 7.0f, x + 4.0f, y + 7.0f);
         g.fillPath (tri);
+
+        // Names: full when the neighbours leave room, one letter when not.
+        const float before = i > 0 ? x - secondsToX (onsets[i - 1].time) : 1000.0f;
+        const float after = i + 1 < onsets.size() ? secondsToX (onsets[i + 1].time) - x : 1000.0f;
+        const float room = std::min (before, after);
+        if (room < 9.0f)
+            continue;
+        const bool tiny = room < 46.0f;
+        g.setFont (juce::FontOptions (tiny ? 10.5f : 11.0f, juce::Font::bold));
+        for (size_t k = 0; k < here.size() && k < 2; ++k)
+        {
+            auto name = theme::shortName (here[k]->instrument, tiny);
+            if (k == 1 && here.size() > 2)
+                name << "+";
+            if (here[k]->confidence < 0.5f && ! here[k]->manual)
+                name << "?";
+            g.setColour (theme::instrument (here[k]->instrument).withAlpha (grabbed ? 1.0f : faded ? 0.3f : 0.95f));
+            g.drawText (name, juce::Rectangle<float> (x - 30.0f, y + 8.0f + 12.0f * (float) k, 60.0f, 12.0f),
+                        juce::Justification::centred, false);
+        }
     }
 
     // Region.
@@ -277,11 +315,12 @@ void WaveformView::paint (juce::Graphics& g)
                     juce::Justification::centredLeft);
     }
 
-    // Playhead.
-    const double pos = processor.getPlayer().getPositionSeconds();
+    // Playhead (the checked instrument's, while listening to it).
+    const bool auditioning = processor.isAuditioning();
+    const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayer().getPositionSeconds();
     if (pos >= viewStart && pos <= viewEnd)
     {
-        g.setColour (theme::accent);
+        g.setColour (auditioning ? theme::instrument (processor.getAuditionInstrument()) : theme::accent);
         g.fillRect (juce::Rectangle<float> (secondsToX (pos) - 0.75f, 0.0f, 1.5f, (float) area.getBottom()));
     }
 }
@@ -366,6 +405,8 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
     if (e.mods.isPopupMenu() || processor.getLoaded() == nullptr || (! dragging && e.getDistanceFromDragStart() < 4))
         return;
 
+    if (! dragging && grab == Grab::hit)
+        processor.beginHitEdit();   // the whole drag is one undo step
     dragging = true;
     const double t = juce::jlimit (0.0, duration, xToSeconds ((float) e.x));
 
@@ -394,11 +435,16 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
     auto& player = processor.getPlayer();
     if (grab != Grab::none)
     {
-        // Moved a flag or a hit: nothing else. A plain click on it plays
-        // from there.
-        if (! dragging)
-            player.setPositionSeconds (grab == Grab::flag ? processor.getAnalysis().grid.firstDownbeat
-                                                          : processor.getAnalysis().onsets[(size_t) grabbedHit].time);
+        // Moved a flag or a hit: nothing else. A plain click on the flag
+        // plays from there; on a hit's marker it asks what the hit really is.
+        if (! dragging && grab == Grab::flag)
+            player.setPositionSeconds (processor.getAnalysis().grid.firstDownbeat);
+        else if (! dragging)
+        {
+            const int index = grabbedHit;
+            grab = Grab::none;
+            showRenameMenu (index);
+        }
     }
     else if (dragging)
     {
@@ -418,15 +464,131 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
 
 void WaveformView::showMenu (const juce::MouseEvent& e)
 {
-    if (processor.getLoaded() == nullptr || processor.getAnalysis().grid.bpm <= 0.0)
+    if (processor.getLoaded() == nullptr)
         return;
 
     const double t = juce::jlimit (0.0, duration, xToSeconds ((float) e.x));
+    const auto& onsets = processor.getAnalysis().onsets;
+    const bool hasTempo = processor.getAnalysis().grid.bpm > 0.0;
+    const auto& choices = drb::allInstruments;
+
+    // The hit under the mouse, if any.
+    int index = -1;
+    float best = 7.0f;
+    for (size_t i = 0; i < onsets.size(); ++i)
+        if (const float d = std::abs (secondsToX (onsets[i].time) - (float) e.x); d < best)
+        {
+            best = d;
+            index = (int) i;
+        }
+
     juce::PopupMenu menu;
-    menu.addItem ("Bar 1 starts here", [this, t]
+    juce::WeakReference<juce::Component> self (this);
+    if (index >= 0)
     {
-        processor.setFirstDownbeat (t);
-        repaint();
+        const auto present = processor.getInstrumentsAt (index);
+        menu.addSectionHeader ("This hit is:");
+        for (auto inst : choices)
+        {
+            const bool on = std::find (present.begin(), present.end(), inst) != present.end();
+            menu.addItem (drb::instrumentName (inst), true, on, [this, self, index, inst]
+            {
+                if (self != nullptr)
+                    processor.toggleInstrument (index, inst);
+            });
+        }
+        menu.addSeparator();
+        menu.addItem ("Delete this hit", [this, self, index]
+        {
+            if (self != nullptr)
+                processor.deleteHit (index);
+        });
+        if (hasTempo)
+        {
+            const double at = onsets[(size_t) index].time;
+            menu.addItem ("Bar 1 starts on this hit", [this, self, at]
+            {
+                if (self != nullptr)
+                    processor.setFirstDownbeat (at, false);
+            });
+        }
+    }
+    else
+    {
+        juce::PopupMenu add;
+        for (auto inst : choices)
+            add.addItem (drb::instrumentName (inst), [this, self, t, inst]
+            {
+                if (self != nullptr)
+                    processor.addHit (t, inst);
+            });
+        menu.addSubMenu ("Add a hit here", add);
+        if (hasTempo)
+            menu.addItem ("Bar 1 starts here", [this, self, t]
+            {
+                if (self != nullptr)
+                    processor.setFirstDownbeat (t);
+            });
+    }
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
+}
+
+// "This is the Snare. It is really: ..." for a click on a hit's marker:
+// every instrument, the one it sounds most like first.
+void WaveformView::showRenameMenu (int index)
+{
+    const auto present = processor.getInstrumentsAt (index);
+    if (present.empty())
+        return;
+
+    juce::WeakReference<juce::Component> self (this);
+    auto choicesFor = [this, self, index] (drb::Instrument from)
+    {
+        juce::PopupMenu m;
+        const auto suggested = processor.suggestInstead (index, from);
+        if (suggested)
+        {
+            m.addItem (juce::String (drb::instrumentName (*suggested)) + "   (suggested)", [this, self, index, from, to = *suggested]
+            {
+                if (self != nullptr)
+                    processor.replaceInstrument (index, from, to);
+            });
+            m.addSeparator();
+        }
+        for (auto to : drb::allInstruments)
+            if (to != from && to != suggested)
+                m.addItem (drb::instrumentName (to), [this, self, index, from, to]
+                {
+                    if (self != nullptr)
+                        processor.replaceInstrument (index, from, to);
+                });
+        return m;
+    };
+
+    // Several instruments here: the one being checked, or ask which.
+    auto from = present.front();
+    if (focus && std::find (present.begin(), present.end(), *focus) != present.end())
+        from = *focus;
+
+    juce::PopupMenu menu;
+    if (present.size() == 1 || focus)
+    {
+        menu.addSectionHeader ("This is the " + juce::String (drb::instrumentName (from)) + ". It is really:");
+        const auto m = choicesFor (from);
+        for (juce::PopupMenu::MenuItemIterator it (m); it.next();)
+            menu.addItem (it.getItem());
+    }
+    else
+    {
+        menu.addSectionHeader ("Change which one?");
+        for (auto inst : present)
+            menu.addSubMenu (juce::String (drb::instrumentName (inst)) + " is really", choicesFor (inst));
+    }
+    menu.addSeparator();
+    menu.addItem ("Delete this hit", [this, self, index]
+    {
+        if (self != nullptr)
+            processor.deleteHit (index);
     });
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
 }
@@ -488,13 +650,14 @@ void WaveformView::scrollBarMoved (juce::ScrollBar*, double newStart)
 
 void WaveformView::timerCallback()
 {
-    const double pos = processor.getPlayer().getPositionSeconds();
+    const bool auditioning = processor.isAuditioning();
+    const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayer().getPositionSeconds();
     if (std::abs (pos - lastPlayhead) < 1.0e-4)
         return;
     lastPlayhead = pos;
 
     // Keep the playhead in view while playing.
-    if (processor.getPlayer().isPlaying() && (pos > viewEnd || pos < viewStart))
+    if ((auditioning || processor.getPlayer().isPlaying()) && (pos > viewEnd || pos < viewStart))
     {
         const double len = viewEnd - viewStart;
         setView (pos - len * 0.05, pos + len * 0.95);

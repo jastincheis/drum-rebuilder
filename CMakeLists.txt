@@ -40,7 +40,9 @@ target_sources(drb_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Tempo.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/AudioFile.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Player.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/Metronome.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/Metronome.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/Classify.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/Midi.cpp)
 target_include_directories(drb_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/core)
 target_link_libraries(drb_core INTERFACE juce::juce_audio_formats juce::juce_dsp)
 
@@ -74,7 +76,8 @@ juce_add_plugin(DrumRebuilder
 target_sources(DrumRebuilder PRIVATE
     plugin/PluginProcessor.cpp
     plugin/PluginEditor.cpp
-    plugin/WaveformView.cpp)
+    plugin/WaveformView.cpp
+    plugin/MidiEditorView.cpp)
 
 target_compile_definitions(DrumRebuilder PUBLIC
     JUCE_WEB_BROWSER=0
