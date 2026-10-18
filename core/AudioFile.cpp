@@ -81,4 +81,26 @@ juce::AudioBuffer<float> resample (const juce::AudioBuffer<float>& in, double fr
     return out;
 }
 
+bool writeWav (const juce::File& target, const juce::AudioBuffer<float>& audio, double sampleRate, int bitsPerSample)
+{
+    if (! target.getParentDirectory().createDirectory())
+        return false;
+
+    juce::TemporaryFile temp (target);
+    {
+        auto stream = temp.getFile().createOutputStream();
+        if (stream == nullptr)
+            return false;
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> out (std::move (stream));
+        auto writer = wav.createWriterFor (out, juce::AudioFormatWriterOptions()
+                                                    .withSampleRate (sampleRate)
+                                                    .withNumChannels (audio.getNumChannels())
+                                                    .withBitsPerSample (bitsPerSample));
+        if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples()))
+            return false;
+    }
+    return temp.overwriteTargetFileWithTemporary();
+}
+
 } // namespace drb

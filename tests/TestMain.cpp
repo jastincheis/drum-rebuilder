@@ -8,6 +8,8 @@
 #include "AudioFile.h"
 #include "Metronome.h"
 #include "Midi.h"
+#include "Rebuild.h"
+#include "Samples.h"
 #include "Player.h"
 #include "Evaluation.h"
 #include "SyntheticDrums.h"
@@ -120,6 +122,132 @@ void checkMidi()
     ok = ok && notes[38].size() == 1 && std::abs (notes[38][0] - (3840.0 + 0.98 * 960.0)) < 0.5;
     ok = ok && notes[42].size() == 3 && std::abs (notes[42][0] - 0.02 * 960.0 - 2880.0) < 0.5;
     check (ok, "MIDI file: tempo, one track per instrument, GM notes, times, pickup bar");
+}
+
+// Sample folders and rebuilding a beat.
+void checkRebuild()
+{
+    auto spec = test::standardSet()[0];   // rock, 90 BPM
+    const auto beat = test::makeBeat (spec);
+    const double sr = spec.sampleRate;
+
+    // Cuts like the plugin's automatic IN / OUT.
+    RebuildInput input;
+    input.audio = &beat.audio;
+    input.sampleRate = sr;
+    input.hits = beat.truth;
+    for (size_t i = 0; i < input.hits.size(); ++i)
+    {
+        const double t = input.hits[i].time;
+        double next = t + 0.4;
+        for (size_t j = i + 1; j < input.hits.size(); ++j)
+            if (input.hits[j].time > t + 1.0e-9)
+            {
+                next = std::min (next, input.hits[j].time - 0.002);
+                break;
+            }
+        input.slices.emplace_back (t - 0.002, next);
+    }
+
+    // 1. Only originals, same tempo: the beat itself (where the cuts are).
+    RebuildSettings settings;
+    const auto same = renderRebuild (input, settings, sr, 0.0);
+    double err = 0.0, ref = 0.0;
+    for (size_t i = 0; i < input.hits.size(); ++i)
+    {
+        const int a = (int) (input.slices[i].first * sr) + (int) (0.003 * sr);
+        const int b = (int) (input.slices[i].second * sr) - (int) (0.012 * sr);
+        for (int k = a; k < b; ++k)
+        {
+            const float o = beat.audio.getSample (0, k), r = same.getSample (0, k);
+            err += (double) (o - r) * (o - r);
+            ref += (double) o * o;
+        }
+    }
+    check (ref > 0.0 && err / ref < 1.0e-3, "rebuild from the originals = the beat (no doubled hits)");
+
+    // 2. A click for every instrument, twice the tempo: hits at half the time.
+    auto click = std::make_shared<Sample>();
+    click->audio.setSize (1, (int) (0.01 * sr));
+    click->audio.clear();
+    click->audio.setSample (0, 2, 1.0f);
+    click->sampleRate = sr;
+    click->peak = 1.0f;
+    for (auto& plan : settings.instruments)
+    {
+        plan.mode = PickMode::Fixed;
+        plan.pool = { click };
+    }
+    settings.tempoFactor = 2.0;
+    const auto fast = renderRebuild (input, settings, sr, 0.0);
+    bool onTime = true;
+    for (const auto& h : input.hits)
+    {
+        const int at = (int) std::lround (h.time / 2.0 * sr);
+        onTime = onTime && fast.getMagnitude (0, std::max (0, at - 8), 24) > 0.01f;
+    }
+    check (onTime && std::abs (fast.getNumSamples() / sr - beat.audio.getNumSamples() / sr / 2.0) < 0.01,
+           "rebuild at twice the tempo: every hit at half the time");
+
+    // 3. Keep the pitch: a 100 Hz kick comes out at the beat's kick pitch.
+    auto tone = std::make_shared<Sample>();
+    tone->audio.setSize (1, (int) (0.3 * sr));
+    for (int i = 0; i < tone->audio.getNumSamples(); ++i)
+        tone->audio.setSample (0, i, (float) (0.8 * std::sin (2.0 * juce::MathConstants<double>::pi * 100.0 * i / sr)
+                                              * std::exp (-i / (0.15 * sr))));
+    tone->sampleRate = sr;
+    tone->peak = tone->audio.getMagnitude (0, tone->audio.getNumSamples());
+    tone->pitch = estimatePitch (tone->audio, sr, Instrument::Kick);
+
+    RebuildInput one = input;
+    one.hits.clear();
+    one.slices.clear();
+    for (size_t i = 0; i < input.hits.size(); ++i)
+        if (input.hits[i].instrument == Instrument::Kick && one.hits.empty())
+        {
+            one.hits.push_back (input.hits[i]);
+            one.slices.push_back (input.slices[i]);
+        }
+    juce::AudioBuffer<float> kickOnly (beat.audio.getNumChannels(), beat.audio.getNumSamples());
+    kickOnly.clear();
+    const int ka = (int) (one.slices[0].first * sr), kb = (int) (one.slices[0].second * sr);
+    for (int ch = 0; ch < kickOnly.getNumChannels(); ++ch)
+        kickOnly.copyFrom (ch, ka, beat.audio, ch, ka, kb - ka);
+    one.audio = &kickOnly;
+    juce::AudioBuffer<float> kickSlice (1, kb - ka);
+    kickSlice.copyFrom (0, 0, beat.audio, 0, ka, kb - ka);
+    const float kickPitch = estimatePitch (kickSlice, sr, Instrument::Kick);
+
+    RebuildSettings tuned;
+    tuned.instruments[(size_t) Instrument::Kick] = { PickMode::Fixed, { tone }, 0 };
+    tuned.keepPitch = true;
+    const auto out = renderRebuild (one, tuned, sr, 0.5);
+    const int at = (int) (one.hits[0].time * sr);
+    juce::AudioBuffer<float> played (1, (int) (0.3 * sr));
+    played.copyFrom (0, 0, out, 0, at, played.getNumSamples());
+    const float got = estimatePitch (played, sr, Instrument::Kick);
+    check (kickPitch > 0.0f && std::abs (got / kickPitch - 1.0f) < 0.06f, "keep pitch: the new kick is tuned to the beat's kick");
+
+    // 4. Saving the originals into folders, and again (replaces them).
+    juce::TemporaryFile tempDir;
+    const auto root = tempDir.getFile();
+    SampleLibrary library (root);
+    std::vector<Cut> cuts;
+    int kicks = 0;
+    for (size_t i = 0; i < input.hits.size(); ++i)
+    {
+        cuts.push_back ({ input.hits[i].instrument, input.slices[i].first, input.slices[i].second });
+        kicks += input.hits[i].instrument == Instrument::Kick ? 1 : 0;
+    }
+    library.saveOriginals ("Test beat", beat.audio, sr, cuts);
+    const int firstCount = (int) library.samples (Instrument::Kick).size();
+    library.saveOriginals ("Test beat", beat.audio, sr, cuts);
+    const auto& saved = library.samples (Instrument::Kick);
+    const bool ok = firstCount == kicks && (int) saved.size() == kicks && ! saved.empty() && saved[0]->original
+                 && saved[0]->fromBeat == "Test beat"
+                 && saved[0]->file.getFileName() == "Test beat (original) 01.wav";
+    check (ok, "original hits saved into the instrument folders, saving again replaces them");
+    root.deleteRecursively();
 }
 
 // The metronome clicks exactly on the beats the player passes.
@@ -342,6 +470,7 @@ int main (int argc, char** argv)
     checkPlayer();
     checkMetronome();
     checkMidi();
+    checkRebuild();
     runAnalysis (writeDir);
 
     std::printf ("%s (%d failed checks)\n", failures == 0 ? "OK" : "FAILED", failures);

@@ -3,6 +3,8 @@
 #include "Analyzer.h"
 #include "AudioFile.h"
 #include "Midi.h"
+#include "Rebuild.h"
+#include "Samples.h"
 #include "Metronome.h"
 #include "Player.h"
 
@@ -100,6 +102,11 @@ public:
 
     drb::Player& getPlayer() { return player; }
 
+    // The playhead on the recording's timeline (also while the rebuilt beat
+    // plays at another tempo): what the views show and set.
+    double getPlayheadSeconds() const { return player.getPositionSeconds() * timelineFactor(); }
+    void setPlayheadSeconds (double t) { player.setPositionSeconds (t / timelineFactor()); }
+
     juce::Range<double> getRegion() const { return region; }
     void setRegion (juce::Range<double>);   // empty = none
     bool isLooping() const { return player.isLooping(); }
@@ -113,6 +120,7 @@ public:
     // own player; starting one stops the other.
     void previewFile (const juce::File&);   // the same file again = from the start
     void stopPreview() { previewPlayer.stop(); }
+    void previewSample (const drb::Sample&);   // a library sound, once
     drb::Player& getPreviewPlayer() { return previewPlayer; }
     const drb::LoadedAudio* getPreview() const { return preview.get(); }   // null while loading
     const juce::File& getPreviewFile() const { return previewTarget; }
@@ -131,6 +139,39 @@ public:
     bool isSoloPlaying() const { return auditionPlayer.isPlaying(); }
     drb::Player& getAuditionPlayer() { return auditionPlayer; }
 
+    // --- Rebuilding the beat with other sounds (stage 3) ---
+
+    drb::SampleLibrary& getLibrary() { return library; }
+    void rescanLibrary();
+    juce::String getBeatName() const;   // the recording's file name, for its originals
+    // Cuts every hit of this beat between its IN and OUT into the
+    // instrument folders. Returns how many sounds were written.
+    int saveOriginals();
+    // The sounds an instrument can be rebuilt with: its folder, without
+    // this beat's own originals.
+    std::vector<drb::SamplePtr> getPool (drb::Instrument) const;
+
+    drb::PickMode getPickMode (drb::Instrument i) const { return pickModes[(size_t) i]; }
+    void setPickMode (drb::Instrument, drb::PickMode);
+    drb::SamplePtr getFixedSample (drb::Instrument) const;   // null = none
+    void setFixedSample (drb::Instrument, const juce::File&);
+    void nextSounds();   // other sounds, at random, for every instrument not on Original
+
+    bool getKeepPitch() const { return keepPitch; }
+    void setKeepPitch (bool);
+    double getRebuildBpm() const;   // the rebuilt beat's tempo
+    void setRebuildBpm (double);
+    double getTempoFactor() const { return tempoFactor; }
+
+    // A/B: what the transport plays, the recording or the rebuilt beat.
+    bool isListeningRebuilt() const { return listenRebuilt; }
+    void setListeningRebuilt (bool);
+    bool isRendering() const { return rendering; }
+
+    // The rebuilt beat as a stereo 24-bit WAV at the recording's sample
+    // rate, with the last sounds' tails. Done in the background.
+    void exportRebuiltWav (const juce::File&, std::function<void (bool ok)> done);
+
     // Instrument checks (0 = not yet, 1 = OK, 2 = wrong), kept with the state.
     int getCheck (drb::Instrument i) const { return checks[(size_t) i]; }
     void setCheck (drb::Instrument, int);
@@ -142,6 +183,31 @@ public:
 private:
     drb::Player player, previewPlayer, auditionPlayer;
     std::array<bool, drb::numInstruments> solo {};
+
+    drb::SampleLibrary library { drb::SampleLibrary::defaultRoot() };
+    std::array<drb::PickMode, drb::numInstruments> pickModes {};
+    std::array<juce::File, drb::numInstruments> fixedFiles;
+    bool keepPitch = false, listenRebuilt = false, rendering = false;
+    double tempoFactor = 1.0;
+    juce::uint32 seed = 1;
+    int renderGeneration = 0;
+    std::unique_ptr<juce::AudioBuffer<float>> originalAtDevice, rebuiltAtDevice;
+    juce::ValueTree pendingRebuild;   // from the saved state, until that file is loaded
+
+    int memoryGeneration = 0;
+    juce::ValueTree makeBeatState() const;
+    void readBeatState (const juce::ValueTree&);
+    static juce::File beatMemoryFile (const juce::File& audio);
+    void saveBeatMemory();
+    void scheduleBeatMemory();
+
+    drb::RebuildInput makeRebuildInput() const;
+    drb::RebuildSettings makeRebuildSettings() const;
+    void chooseDefaultSounds();
+    void requestRender();
+    void showSource (double previousFactor);   // puts the original or the rebuilt beat in the player
+    double timelineFactor() const { return listenRebuilt && rebuiltAtDevice != nullptr ? tempoFactor : 1.0; }
+    void applyLoop();
     int soloRebuild = 0;
     std::array<int, drb::numInstruments> checks {};
     std::array<int, drb::numInstruments> pendingChecks {};

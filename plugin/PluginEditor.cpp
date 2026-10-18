@@ -687,6 +687,484 @@ private:
     }
 };
 
+// --- Sample Browser ------------------------------------------------------
+
+// The library: one folder per instrument. Save this beat's original hits
+// into it, add your own sounds, listen to them, pick one for the rebuild.
+class SampleBrowserPage : public juce::Component,
+                          private juce::ListBoxModel
+{
+public:
+    explicit SampleBrowserPage (DrumRebuilderProcessor& p) : processor (p)
+    {
+        for (auto* b : { &saveButton, &addButton, &useButton, &trashButton, &openFolderButton, &changeFolderButton, &rescanButton })
+        {
+            b->setWantsKeyboardFocus (false);
+            addAndMakeVisible (b);
+        }
+        saveButton.setColour (juce::TextButton::buttonColourId, theme::accent.withAlpha (0.85f));
+        saveButton.setColour (juce::TextButton::textColourOffId, juce::Colours::black);
+        saveButton.onClick = [this]
+        {
+            const int n = processor.saveOriginals();
+            result.setText (n > 0 ? juce::String (n) + " sounds saved from \"" + processor.getBeatName() + "\""
+                                  : juce::String ("Nothing saved: open a beat first"),
+                            juce::dontSendNotification);
+        };
+        addButton.onClick = [this] { addSounds(); };
+        useButton.onClick = [this]
+        {
+            if (auto s = selectedSample())
+                processor.setFixedSample (instrument(), s->file);
+        };
+        trashButton.onClick = [this]
+        {
+            if (auto s = selectedSample())
+            {
+                s->file.moveToTrash();
+                processor.rescanLibrary();
+            }
+        };
+        openFolderButton.onClick = [this]
+        {
+            const auto folder = processor.getLibrary().folderFor (instrument());
+            folder.createDirectory();
+            folder.startAsProcess();
+        };
+        changeFolderButton.onClick = [this] { changeFolder(); };
+        rescanButton.onClick = [this] { processor.rescanLibrary(); };
+
+        instruments.setModel (&instrumentModel);
+        instrumentModel.owner = this;
+        sounds.setModel (this);
+        for (auto* l : { &instruments, &sounds })
+        {
+            l->setRowHeight (26);
+            l->setColour (juce::ListBox::backgroundColourId, theme::panel);
+            addAndMakeVisible (l);
+        }
+        instruments.selectRow (0);
+
+        setupLabel (rootLabel, theme::textDim, 13.0f);
+        setupLabel (help, theme::textDim, 13.0f);
+        setupLabel (result, theme::accent, 14.0f);
+        help.setJustificationType (juce::Justification::topLeft);
+        help.setText ("Saves every hit of this beat, cut between its IN and OUT (set them on the Instruments tab), into the folder of its "
+                      "instrument, as \"<beat> (original) 01.wav\". Saving again replaces them.",
+                      juce::dontSendNotification);
+        for (auto* l : { &rootLabel, &help, &result })
+            addAndMakeVisible (l);
+        update();
+    }
+
+    void update()
+    {
+        rootLabel.setText ("Library: " + processor.getLibrary().getRoot().getFullPathName(), juce::dontSendNotification);
+        saveButton.setEnabled (processor.getLoaded() != nullptr && ! processor.getAnalysis().hits.empty());
+        instruments.updateContent();
+        sounds.updateContent();
+        instruments.repaint();
+        sounds.repaint();
+        const bool has = selectedSample() != nullptr;
+        useButton.setEnabled (has);
+        trashButton.setEnabled (has);
+    }
+
+    void paint (juce::Graphics& g) override { g.fillAll (theme::background); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (12);
+        auto top = r.removeFromTop (30);
+        saveButton.setBounds (top.removeFromLeft (250));
+        top.removeFromLeft (12);
+        result.setBounds (top);
+        r.removeFromTop (4);
+        help.setBounds (r.removeFromTop (36));
+        r.removeFromTop (6);
+
+        auto bottom = r.removeFromBottom (30);
+        rootLabel.setBounds (bottom.removeFromLeft (bottom.getWidth() / 2));
+        rescanButton.setBounds (bottom.removeFromRight (80).reduced (0, 2));
+        bottom.removeFromRight (6);
+        changeFolderButton.setBounds (bottom.removeFromRight (140).reduced (0, 2));
+        r.removeFromBottom (6);
+
+        instruments.setBounds (r.removeFromLeft (220));
+        r.removeFromLeft (10);
+        auto buttons = r.removeFromTop (30);
+        for (auto* b : { &addButton, &useButton, &trashButton, &openFolderButton })
+        {
+            b->setBounds (buttons.removeFromLeft (b == &useButton ? 160 : 130).reduced (0, 1));
+            buttons.removeFromLeft (6);
+        }
+        r.removeFromTop (6);
+        sounds.setBounds (r);
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    juce::ListBox instruments, sounds;
+    juce::TextButton saveButton { "Save this beat's original sounds" }, addButton { "Add sounds..." },
+                     useButton { "Use for the rebuild" }, trashButton { "Move to trash" }, openFolderButton { "Open folder" },
+                     changeFolderButton { "Change library..." }, rescanButton { "Rescan" };
+    juce::Label rootLabel, help, result;
+    std::unique_ptr<juce::FileChooser> chooser;
+
+    drb::Instrument instrument() const
+    {
+        const int row = juce::jlimit (0, drb::numInstruments - 1, instruments.getSelectedRow());
+        return drb::allInstruments[(size_t) row];
+    }
+
+    drb::SamplePtr selectedSample() const
+    {
+        const auto& list = processor.getLibrary().samples (instrument());
+        const int row = sounds.getSelectedRow();
+        return juce::isPositiveAndBelow (row, (int) list.size()) ? list[(size_t) row] : nullptr;
+    }
+
+    // Left: the instruments, with how many sounds each folder has.
+    struct InstrumentModel : public juce::ListBoxModel
+    {
+        SampleBrowserPage* owner = nullptr;
+        int getNumRows() override { return drb::numInstruments; }
+        void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override
+        {
+            const auto inst = drb::allInstruments[(size_t) row];
+            if (selected)
+                g.fillAll (theme::panelLight);
+            g.setColour (theme::instrument (inst));
+            g.fillRect (6, 6, 4, h - 12);
+            g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
+            g.drawText (drb::instrumentName (inst), 18, 0, w - 70, h, juce::Justification::centredLeft);
+            g.setColour (theme::textDim);
+            g.setFont (juce::FontOptions (12.0f));
+            g.drawText (juce::String ((int) owner->processor.getLibrary().samples (inst).size()), w - 50, 0, 40, h,
+                        juce::Justification::centredRight);
+        }
+        void selectedRowsChanged (int) override
+        {
+            owner->sounds.deselectAllRows();
+            owner->update();
+        }
+    } instrumentModel;
+
+    // Right: the selected instrument's sounds. Click = listen.
+    int getNumRows() override { return (int) processor.getLibrary().samples (instrument()).size(); }
+
+    void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override
+    {
+        const auto& list = processor.getLibrary().samples (instrument());
+        if (! juce::isPositiveAndBelow (row, (int) list.size()))
+            return;
+        const auto& s = *list[(size_t) row];
+        if (selected)
+            g.fillAll (theme::panelLight);
+
+        const bool inUse = processor.getFixedSample (instrument()) != nullptr && processor.getFixedSample (instrument())->file == s.file;
+        auto r = juce::Rectangle<int> (0, 0, w, h).reduced (10, 0);
+        if (s.original)
+        {
+            const auto tag = r.removeFromLeft (70).reduced (0, 5);
+            g.setColour (theme::startFlag);
+            g.fillRoundedRectangle (tag.toFloat(), 4.0f);
+            g.setColour (juce::Colours::black);
+            g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+            g.drawText ("ORIGINAL", tag, juce::Justification::centred);
+            r.removeFromLeft (8);
+        }
+        g.setColour (inUse ? theme::accent : theme::text);
+        g.setFont (juce::FontOptions (13.5f, inUse ? juce::Font::bold : juce::Font::plain));
+        const auto info = juce::String (s.audio.getNumSamples() / s.sampleRate, 2) + " s" + (inUse ? "   in use" : "");
+        g.drawText (info, r.removeFromRight (120), juce::Justification::centredRight);
+        g.drawText (s.file.getFileNameWithoutExtension(), r, juce::Justification::centredLeft, true);
+    }
+
+    void listBoxItemClicked (int row, const juce::MouseEvent&) override
+    {
+        const auto& list = processor.getLibrary().samples (instrument());
+        if (juce::isPositiveAndBelow (row, (int) list.size()))
+            processor.previewSample (*list[(size_t) row]);
+        update();
+    }
+
+    void listBoxItemDoubleClicked (int row, const juce::MouseEvent&) override
+    {
+        const auto& list = processor.getLibrary().samples (instrument());
+        if (juce::isPositiveAndBelow (row, (int) list.size()))
+            processor.setFixedSample (instrument(), list[(size_t) row]->file);
+    }
+
+    void addSounds()
+    {
+        const auto inst = instrument();
+        chooser = std::make_unique<juce::FileChooser> ("Add sounds to " + juce::String (drb::instrumentName (inst)),
+                                                       juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                                                       drb::supportedWildcard());
+        juce::Component::SafePointer<SampleBrowserPage> self (this);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                                  | juce::FileBrowserComponent::canSelectMultipleItems,
+                              [self, inst] (const juce::FileChooser& fc)
+                              {
+                                  if (self == nullptr || fc.getResults().isEmpty())
+                                      return;
+                                  const int n = self->processor.getLibrary().addFiles (inst, fc.getResults());
+                                  self->processor.rescanLibrary();
+                                  self->result.setText (juce::String (n) + " sounds added to " + drb::instrumentName (inst),
+                                                        juce::dontSendNotification);
+                              });
+    }
+
+    void changeFolder()
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Choose the library folder", processor.getLibrary().getRoot());
+        juce::Component::SafePointer<SampleBrowserPage> self (this);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                              [self] (const juce::FileChooser& fc)
+                              {
+                                  if (self == nullptr || ! fc.getResult().isDirectory())
+                                      return;
+                                  self->processor.getLibrary().setRoot (fc.getResult());
+                                  self->processor.rescanLibrary();
+                              });
+    }
+};
+
+// --- Drum Rack (rebuild) ---------------------------------------------------
+
+// One row per instrument: how its hits pick their sound, which sound.
+class RackRow : public juce::Component
+{
+public:
+    RackRow (DrumRebuilderProcessor& p, drb::Instrument i) : processor (p), instrument (i)
+    {
+        for (auto m : drb::allPickModes)
+            mode.addItem (drb::pickModeName (m), (int) m + 1);
+        mode.onChange = [this] { processor.setPickMode (instrument, (drb::PickMode) (mode.getSelectedId() - 1)); };
+        sound.onChange = [this]
+        {
+            const auto pool = processor.getPool (instrument);
+            const int k = sound.getSelectedId() - 1;
+            if (juce::isPositiveAndBelow (k, (int) pool.size()))
+                processor.setFixedSample (instrument, pool[(size_t) k]->file);
+        };
+        listen.onClick = [this]
+        {
+            if (auto s = processor.getFixedSample (instrument))
+                processor.previewSample (*s);
+        };
+        for (auto* c : std::initializer_list<juce::Component*> { &mode, &sound, &listen })
+        {
+            c->setWantsKeyboardFocus (false);
+            addAndMakeVisible (c);
+        }
+        setupLabel (info, theme::textDim, 12.5f);
+        addAndMakeVisible (info);
+        update();
+    }
+
+    drb::Instrument getInstrument() const { return instrument; }
+
+    void update()
+    {
+        const auto pool = processor.getPool (instrument);
+        const auto m = processor.getPickMode (instrument);
+        mode.setSelectedId ((int) m + 1, juce::dontSendNotification);
+        mode.setEnabled (! pool.empty());
+
+        sound.clear (juce::dontSendNotification);
+        const auto fixed = processor.getFixedSample (instrument);
+        for (size_t k = 0; k < pool.size(); ++k)
+        {
+            sound.addItem (pool[k]->file.getFileNameWithoutExtension(), (int) k + 1);
+            if (fixed != nullptr && pool[k]->file == fixed->file)
+                sound.setSelectedId ((int) k + 1, juce::dontSendNotification);
+        }
+        sound.setEnabled (m == drb::PickMode::Fixed && ! pool.empty());
+        listen.setEnabled (fixed != nullptr);
+
+        int hits = 0;
+        for (const auto& h : processor.getAnalysis().hits)
+            hits += h.instrument == instrument ? 1 : 0;
+        juce::String text;
+        text << hits << (hits == 1 ? " hit    " : " hits    ");
+        if (pool.empty())
+            text << "folder empty: plays its original sounds";
+        else if (m == drb::PickMode::Original)
+            text << "its original sounds (" << (int) pool.size() << " others in the folder)";
+        else
+            text << (int) pool.size() << " sounds in the folder";
+        info.setText (text, juce::dontSendNotification);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.setColour (theme::panel);
+        g.fillRoundedRectangle (getLocalBounds().toFloat(), 6.0f);
+        g.setColour (theme::instrument (instrument));
+        g.fillRect (8, 8, 5, getHeight() - 16);
+        g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
+        g.drawText (drb::instrumentName (instrument), 22, 0, 130, getHeight(), juce::Justification::centredLeft);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (8, 7);
+        r.removeFromLeft (150);
+        mode.setBounds (r.removeFromLeft (130));
+        r.removeFromLeft (8);
+        sound.setBounds (r.removeFromLeft (std::min (380, r.getWidth() / 2)));
+        r.removeFromLeft (6);
+        listen.setBounds (r.removeFromLeft (70));
+        r.removeFromLeft (12);
+        info.setBounds (r);
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    drb::Instrument instrument;
+    juce::ComboBox mode, sound;
+    juce::TextButton listen { "Listen" };
+    juce::Label info;
+};
+
+class DrumRackPage : public juce::Component
+{
+public:
+    explicit DrumRackPage (DrumRebuilderProcessor& p) : processor (p)
+    {
+        for (auto* b : { &aButton, &bButton })
+        {
+            b->setClickingTogglesState (false);
+            b->setWantsKeyboardFocus (false);
+            addAndMakeVisible (b);
+        }
+        aButton.onClick = [this] { processor.setListeningRebuilt (false); };
+        bButton.onClick = [this] { processor.setListeningRebuilt (true); };
+        aButton.setTooltip ("Hear the recording as it is");
+        bButton.setTooltip ("Hear the beat rebuilt with the sounds below");
+
+        nextButton.setWantsKeyboardFocus (false);
+        nextButton.onClick = [this] { processor.nextSounds(); };
+        nextButton.setTooltip ("Other sounds from the folders, at random, for every instrument not on Original");
+        addAndMakeVisible (nextButton);
+
+        keepPitch.setWantsKeyboardFocus (false);
+        keepPitch.onClick = [this] { processor.setKeepPitch (keepPitch.getToggleState()); };
+        keepPitch.setTooltip ("Tune each new sound to the original instrument (kick, toms: their note; hi-hats: their brightness)");
+        addAndMakeVisible (keepPitch);
+
+        setupLabel (tempoLabel, theme::textDim);
+        tempoLabel.setText ("Tempo", juce::dontSendNotification);
+        addAndMakeVisible (tempoLabel);
+        tempo.setTextValueSuffix (" BPM");
+        tempo.setNumDecimalPlacesToDisplay (1);
+        tempo.setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 22);
+        tempo.setWantsKeyboardFocus (false);
+        tempo.setColour (juce::Slider::backgroundColourId, theme::panelLight);
+        tempo.setColour (juce::Slider::trackColourId, theme::accent.withAlpha (0.7f));
+        tempo.onValueChange = [this] { processor.setRebuildBpm (tempo.getValue()); };
+        tempo.onDragEnd = [this] { processor.setRebuildBpm (tempo.getValue()); };
+        addAndMakeVisible (tempo);
+        resetTempo.setWantsKeyboardFocus (false);
+        resetTempo.onClick = [this] { processor.setRebuildBpm (processor.getAnalysis().grid.bpm); };
+        addAndMakeVisible (resetTempo);
+
+        setupLabel (status, theme::textDim, 13.0f);
+        setupLabel (hint, theme::textDim, 12.5f);
+        hint.setText ("Space / Play plays A or B. Same hits, timing and accents as the recording. "
+                      "Save the originals and add your own sounds on the Sample Browser tab.",
+                      juce::dontSendNotification);
+        addAndMakeVisible (status);
+        addAndMakeVisible (hint);
+        update();
+    }
+
+    void update()
+    {
+        // A row for every instrument the beat has.
+        std::vector<drb::Instrument> wanted;
+        for (auto inst : drb::allInstruments)
+            for (const auto& h : processor.getAnalysis().hits)
+                if (h.instrument == inst)
+                {
+                    wanted.push_back (inst);
+                    break;
+                }
+        bool same = wanted.size() == rows.size();
+        for (size_t k = 0; same && k < rows.size(); ++k)
+            same = rows[k]->getInstrument() == wanted[k];
+        if (! same)
+        {
+            rows.clear();
+            for (auto inst : wanted)
+                addAndMakeVisible (*rows.emplace_back (std::make_unique<RackRow> (processor, inst)));
+            resized();
+        }
+        for (auto& r : rows)
+            r->update();
+
+        const bool b = processor.isListeningRebuilt();
+        aButton.setToggleState (! b, juce::dontSendNotification);
+        bButton.setToggleState (b, juce::dontSendNotification);
+        keepPitch.setToggleState (processor.getKeepPitch(), juce::dontSendNotification);
+
+        const double bpm = processor.getAnalysis().grid.bpm;
+        const bool hasTempo = bpm > 0.0 && processor.getLoaded() != nullptr;
+        tempo.setEnabled (hasTempo);
+        resetTempo.setEnabled (hasTempo);
+        if (hasTempo)
+        {
+            tempo.setRange (bpm * 0.5, bpm * 2.0, 0.1);
+            tempo.setValue (processor.getRebuildBpm(), juce::dontSendNotification);
+        }
+        status.setText (processor.getLoaded() == nullptr ? juce::String ("Open a beat first")
+                        : processor.isRendering()        ? juce::String ("Rebuilding...")
+                        : b                              ? juce::String ("Listening: B, the rebuilt beat")
+                                                         : juce::String ("Listening: A, the recording"),
+                        juce::dontSendNotification);
+    }
+
+    void paint (juce::Graphics& g) override { g.fillAll (theme::background); }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (12);
+        auto bar = r.removeFromTop (34);
+        aButton.setBounds (bar.removeFromLeft (110));
+        bar.removeFromLeft (4);
+        bButton.setBounds (bar.removeFromLeft (110));
+        bar.removeFromLeft (16);
+        nextButton.setBounds (bar.removeFromLeft (120));
+        bar.removeFromLeft (16);
+        keepPitch.setBounds (bar.removeFromLeft (170));
+        bar.removeFromLeft (10);
+        tempoLabel.setBounds (bar.removeFromLeft (48));
+        tempo.setBounds (bar.removeFromLeft (260));
+        bar.removeFromLeft (6);
+        resetTempo.setBounds (bar.removeFromLeft (80).reduced (0, 3));
+        bar.removeFromLeft (12);
+        status.setBounds (bar);
+
+        hint.setBounds (r.removeFromBottom (22));
+        r.removeFromTop (10);
+        for (auto& row : rows)
+        {
+            row->setBounds (r.removeFromTop (44));
+            r.removeFromTop (6);
+        }
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    std::vector<std::unique_ptr<RackRow>> rows;
+    juce::TextButton aButton { "A  Original" }, bButton { "B  Rebuilt" }, nextButton { "Next sounds" }, resetTempo { "Original" };
+    juce::ToggleButton keepPitch { "Keep original pitch" };
+    juce::Label tempoLabel, status, hint;
+    juce::Slider tempo { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+};
+
 // --- Export --------------------------------------------------------------
 
 class ExportPage : public juce::Component
@@ -697,6 +1175,16 @@ public:
         midiButton.setWantsKeyboardFocus (false);
         midiButton.onClick = [this] { exportMidi(); };
         addAndMakeVisible (midiButton);
+        wavButton.setWantsKeyboardFocus (false);
+        wavButton.onClick = [this] { exportWav(); };
+        addAndMakeVisible (wavButton);
+        setupLabel (wavTitle, theme::text, 18.0f);
+        wavTitle.setText ("Audio", juce::dontSendNotification);
+        setupLabel (wavInfo, theme::text, 14.0f);
+        wavInfo.setJustificationType (juce::Justification::topLeft);
+        setupLabel (wavResult, theme::accent, 14.0f);
+        for (auto* l : { &wavTitle, &wavInfo, &wavResult })
+            addAndMakeVisible (l);
 
         setupLabel (title, theme::text, 18.0f);
         title.setText ("MIDI", juce::dontSendNotification);
@@ -705,7 +1193,7 @@ public:
         setupLabel (result, theme::accent, 14.0f);
         setupLabel (later, theme::textDim, 14.0f);
         later.setJustificationType (juce::Justification::topLeft);
-        later.setText ("Stereo WAV of the rebuilt beat - stage 3\nStems, one WAV per instrument with the Reverb and Delay tails - stage 5",
+        later.setText ("Stems, one WAV per instrument with the Reverb and Delay tails - stage 5",
                        juce::dontSendNotification);
         for (auto* l : { &title, &info, &result, &later })
             addAndMakeVisible (l);
@@ -734,6 +1222,12 @@ public:
         }
         info.setText (text, juce::dontSendNotification);
         midiButton.setEnabled (processor.getLoaded() != nullptr && ! a.hits.empty());
+        wavButton.setEnabled (processor.getLoaded() != nullptr && ! a.hits.empty());
+        wavInfo.setText (processor.getLoaded() == nullptr ? juce::String()
+                         : "The rebuilt beat (the Drum Rack's sounds" + juce::String (processor.getKeepPitch() ? ", tuned" : "")
+                               + ", at " + juce::String (processor.getRebuildBpm(), 1) + " BPM), stereo 24-bit WAV at the "
+                               "recording's sample rate, with the last sounds ringing out.",
+                         juce::dontSendNotification);
     }
 
     void paint (juce::Graphics& g) override { g.fillAll (theme::background); }
@@ -749,14 +1243,47 @@ public:
         midiButton.setBounds (row.removeFromLeft (150));
         row.removeFromLeft (12);
         result.setBounds (row);
-        r.removeFromTop (40);
+        r.removeFromTop (30);
+        wavTitle.setBounds (r.removeFromTop (28));
+        r.removeFromTop (6);
+        wavInfo.setBounds (r.removeFromTop (40));
+        auto wavRow = r.removeFromTop (32);
+        wavButton.setBounds (wavRow.removeFromLeft (150));
+        wavRow.removeFromLeft (12);
+        wavResult.setBounds (wavRow);
+        r.removeFromTop (30);
         later.setBounds (r.removeFromTop (60));
     }
 
 private:
     DrumRebuilderProcessor& processor;
-    juce::TextButton midiButton { "Export MIDI..." };
-    juce::Label title, info, result, later;
+    juce::TextButton midiButton { "Export MIDI..." }, wavButton { "Export WAV..." };
+    juce::Label title, info, result, later, wavTitle, wavInfo, wavResult;
+
+    void exportWav()
+    {
+        const auto* l = processor.getLoaded();
+        if (l == nullptr)
+            return;
+        const auto suggested = l->file.getParentDirectory().getChildFile (l->file.getFileNameWithoutExtension() + " rebuilt.wav");
+        chooser = std::make_unique<juce::FileChooser> ("Save the rebuilt beat as WAV", suggested, "*.wav");
+        juce::Component::SafePointer<ExportPage> self (this);
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                                  | juce::FileBrowserComponent::warnAboutOverwriting,
+                              [self] (const juce::FileChooser& fc)
+                              {
+                                  if (self == nullptr || fc.getResult() == juce::File())
+                                      return;
+                                  const auto file = fc.getResult().withFileExtension ("wav");
+                                  self->wavResult.setText ("Saving...", juce::dontSendNotification);
+                                  self->processor.exportRebuiltWav (file, [self, file] (bool ok)
+                                  {
+                                      if (self != nullptr)
+                                          self->wavResult.setText (ok ? "Saved " + file.getFileName() : "Could not save " + file.getFullPathName(),
+                                                                   juce::dontSendNotification);
+                                  });
+                              });
+    }
     std::unique_ptr<juce::FileChooser> chooser;
 
     void exportMidi()
@@ -823,7 +1350,7 @@ DrumRebuilderEditor::DrumRebuilderEditor (DrumRebuilderProcessor& p)
     doubleButton.onClick = [this] { processor.scaleTempo (2.0); };
     barOneButton.onClick = [this]
     {
-        processor.getPlayer().setPositionSeconds (processor.setFirstDownbeat (processor.getPlayer().getPositionSeconds()));
+        processor.setPlayheadSeconds (processor.setFirstDownbeat (processor.getPlayheadSeconds()));
     };
 
     setupLabel (fileLabel, theme::text);
@@ -843,13 +1370,11 @@ DrumRebuilderEditor::DrumRebuilderEditor (DrumRebuilderProcessor& p)
     tabs.addTab ("Instruments", theme::panel, instrumentsPage, true);
     midiPage = new MidiEditorPage (processor);
     tabs.addTab ("MIDI Editor", theme::panel, midiPage, true);
-    const std::pair<const char*, const char*> later[] {
-        { "Sample Browser", "Your sample folders, one per instrument - stage 3" },
-        { "Drum Rack",      "Volume, pan, pitch, mute, solo, Reverb and Delay per instrument - stages 3 and 5" },
-        { "Master",         "Master Reverb and Delay, A/B with the original - stages 3 and 5" },
-    };
-    for (const auto& [name, stage] : later)
-        tabs.addTab (name, theme::panel, new Placeholder (name, stage), true);
+    samplePage = new SampleBrowserPage (processor);
+    tabs.addTab ("Sample Browser", theme::panel, samplePage, true);
+    rackPage = new DrumRackPage (processor);
+    tabs.addTab ("Drum Rack", theme::panel, rackPage, true);
+    tabs.addTab ("Master", theme::panel, new Placeholder ("Master", "Master Reverb and Delay - stage 5"), true);
     exportPage = new ExportPage (processor);
     tabs.addTab ("Export", theme::panel, exportPage, true);
     tabs.setTabBarDepth (32);
@@ -952,7 +1477,7 @@ bool DrumRebuilderEditor::keyPressed (const juce::KeyPress& key)
     {
         const auto* l = processor.getLoaded();
         const double t = c == 'w' ? 0.0 : std::max (0.0, l->audio.getNumSamples() / l->sampleRate - 0.001);
-        processor.getPlayer().setPositionSeconds (t);
+        processor.setPlayheadSeconds (t);
         waveform.scrollToShow (t);
         return true;
     }
@@ -1062,6 +1587,8 @@ void DrumRebuilderEditor::changeListenerCallback (juce::ChangeBroadcaster*)
     analysisPage->update();
     instrumentsPage->update();
     midiPage->update();
+    samplePage->update();
+    rackPage->update();
     exportPage->update();
 
     if (processor.getLoadedId() != shownId)
@@ -1081,7 +1608,7 @@ void DrumRebuilderEditor::timerCallback()
 
     const auto& player = processor.getPlayer();
     const double position = processor.isSoloPlaying() ? processor.getAuditionPlayer().getPositionSeconds()
-                                                      : player.getPositionSeconds();
+                                                      : processor.getPlayheadSeconds();
     juce::String t = formatTime (position);
 
     // Where we are in the music: bar.beat

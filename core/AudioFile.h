@@ -22,6 +22,10 @@ bool isSupported (const juce::File&);
 // stray album doesn't eat all the RAM). Error text in `error` on failure.
 std::optional<LoadedAudio> loadAudioFile (const juce::File&, juce::String& error, double maxSeconds = 600.0);
 
+// Writes a WAV file (24-bit by default), through a temporary file so a
+// failed write never leaves half a file behind.
+bool writeWav (const juce::File&, const juce::AudioBuffer<float>&, double sampleRate, int bitsPerSample = 24);
+
 // High-quality copy at another sample rate, for playback on a device that
 // runs at a different rate than the file.
 juce::AudioBuffer<float> resample (const juce::AudioBuffer<float>&, double fromRate, double toRate);

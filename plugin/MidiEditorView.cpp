@@ -153,7 +153,7 @@ void MidiEditorView::zoomBy (double factor, double around)
 
 double MidiEditorView::zoomCentre() const
 {
-    const double pos = processor.getPlayer().getPositionSeconds();
+    const double pos = processor.getPlayheadSeconds();
     return pos >= viewStart && pos <= viewEnd ? pos : (viewStart + viewEnd) * 0.5;
 }
 
@@ -268,7 +268,7 @@ void MidiEditorView::paint (juce::Graphics& g)
     g.restoreState();
 
     // Playhead.
-    const double pos = processor.getPlayer().getPositionSeconds();
+    const double pos = processor.getPlayheadSeconds();
     if (pos >= viewStart && pos <= viewEnd)
     {
         g.setColour (theme::accent);
@@ -310,7 +310,7 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
     }
     else if (e.y < rulerHeight && e.x >= laneArea().getX())
     {
-        processor.getPlayer().setPositionSeconds (juce::jlimit (0.0, duration, xToSeconds ((float) e.x)));
+        processor.setPlayheadSeconds (juce::jlimit (0.0, duration, xToSeconds ((float) e.x)));
     }
     repaint();
 }
@@ -334,7 +334,7 @@ void MidiEditorView::mouseUp (const juce::MouseEvent& e)
 {
     // A plain click on a hit: the playhead goes there.
     if (dragHit >= 0 && ! dragMoved && ! justAdded && ! e.mods.isPopupMenu())
-        processor.getPlayer().setPositionSeconds (processor.getAnalysis().hits[(size_t) dragHit].time);
+        processor.setPlayheadSeconds (processor.getAnalysis().hits[(size_t) dragHit].time);
     dragHit = -1;
     dragMoved = justAdded = false;
 }
@@ -411,7 +411,7 @@ void MidiEditorView::scrollBarMoved (juce::ScrollBar*, double newStart)
 
 void MidiEditorView::timerCallback()
 {
-    const double pos = processor.getPlayer().getPositionSeconds();
+    const double pos = processor.getPlayheadSeconds();
     if (std::abs (pos - lastPlayhead) < 1.0e-4)
         return;
     lastPlayhead = pos;

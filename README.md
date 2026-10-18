@@ -8,13 +8,14 @@ hi-hats, clap, rimshot, toms, crash, ride) with velocity, swing and
 microtiming, turns them into editable MIDI, and rebuilds the beat with your own
 samples while keeping the groove.
 
-**Status: stage 2 (in progress)** — browse and preview files, open a recording,
+**Status: stage 3 (in progress)** — browse and preview files, open a recording,
 see its waveform with the bar and beat grid and every hit named (kick, snare,
-hi-hat closed / open), play / pause / stop, loop a region or a single hit,
-zoom, metronome. Tempo, bars and hits are detected and can be fixed by hand
-(drag bar 1 and the hits, right-click a hit to change its instrument). Check
-each instrument by ear ("Is this the Kick?"). MIDI Editor with one row per
-instrument, quantize, undo, MIDI export.
+hi-hat closed / open), fix tempo, bar 1, hits, instruments and each hit's IN /
+OUT by hand, solo instruments, MIDI Editor with quantize and undo, MIDI
+export. Each beat remembers its fixes. Sample library with one folder per
+instrument (the beat's original hits are saved into it), and the beat rebuilt
+from it: per instrument Original / Fixed / Random / Round robin / By velocity,
+Next sounds, keep the original pitch, another tempo, A/B, WAV export.
 
 Keys: Space play / pause, W / E start / end, Left / Right previous / next hit,
 Up / Down zoom, Ctrl+Z / Ctrl+Shift+Z undo / redo, Delete removes the selected

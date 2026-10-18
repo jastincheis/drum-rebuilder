@@ -6,7 +6,9 @@
 
 DrumRebuilderProcessor::DrumRebuilderProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true))
-{}
+{
+    library.rescan();
+}
 
 DrumRebuilderProcessor::~DrumRebuilderProcessor() = default;
 
@@ -52,22 +54,59 @@ juce::AudioProcessorEditor* DrumRebuilderProcessor::createEditor()
     return new DrumRebuilderEditor (*this);
 }
 
-// The recording and the preview at the device's rate, keeping the play
-// positions.
+// The recording, the preview and the rebuilt beat at the device's rate,
+// keeping the play positions.
 void DrumRebuilderProcessor::installPlayback()
 {
     if (preparedRate <= 0.0)
         return;
 
-    for (auto [audio, p] : { std::pair { loaded.get(), &player }, std::pair { preview.get(), &previewPlayer } })
+    if (loaded != nullptr)
     {
-        if (audio == nullptr)
-            continue;
-        const double at = p->getPositionSeconds();
-        p->setSource (std::make_unique<juce::AudioBuffer<float>> (
-            drb::resample (audio->audio, audio->sampleRate, preparedRate)));
-        p->setPositionSeconds (at);
+        originalAtDevice = std::make_unique<juce::AudioBuffer<float>> (drb::resample (loaded->audio, loaded->sampleRate, preparedRate));
+        rebuiltAtDevice.reset();
+        showSource (timelineFactor());
+        requestRender();
     }
+    if (preview != nullptr)
+    {
+        const double at = previewPlayer.getPositionSeconds();
+        previewPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::resample (preview->audio, preview->sampleRate, preparedRate)));
+        previewPlayer.setPositionSeconds (at);
+    }
+}
+
+// The player gets the recording, or the rebuilt beat while listening to it
+// (B), at the same musical spot: positions scale with the rebuilt tempo.
+void DrumRebuilderProcessor::showSource (double previousFactor)
+{
+    const auto* buffer = listenRebuilt && rebuiltAtDevice != nullptr ? rebuiltAtDevice.get() : originalAtDevice.get();
+    if (buffer == nullptr)
+        return;
+    const double at = player.getPositionSeconds() * previousFactor / timelineFactor();
+    player.setSource (std::make_unique<juce::AudioBuffer<float>> (*buffer));
+    player.setPositionSeconds (at);
+    applyLoop();
+    updateMetronomeGrid();
+}
+
+void DrumRebuilderProcessor::applyLoop()
+{
+    const double f = timelineFactor();
+    player.setLoop (player.isLooping(), { region.getStart() / f, region.getEnd() / f });
+}
+void DrumRebuilderProcessor::previewSample (const drb::Sample& sample)
+{
+    const double rate = preparedRate > 0.0 ? preparedRate : 44100.0;
+    player.pause();
+    auditionPlayer.pause();
+    previewPlayer.stop();
+    previewTarget = juce::File();
+    preview.reset();
+    previewPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::resample (sample.audio, sample.sampleRate, rate)));
+    previewPlayer.setLoop (false, {});
+    previewPlayer.setPositionSeconds (0.0);
+    previewPlayer.play();
 }
 
 void DrumRebuilderProcessor::previewFile (const juce::File& file)
@@ -138,6 +177,7 @@ void DrumRebuilderProcessor::previewFile (const juce::File& file)
 
 void DrumRebuilderProcessor::loadFile (const juce::File& file)
 {
+    saveBeatMemory();   // the beat we leave keeps its fixes
     const int generation = ++loadGeneration;
     player.stop();
     previewPlayer.stop();
@@ -205,7 +245,15 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
             p->auditionPlayer.clearSource();
             p->solo = {};
             p->checks = {};
-            const bool restoring = p->loaded->file == p->pendingFile;
+            // Opened before? Its fixes come back. The beat's own memory is
+            // written at every change, so it wins over an older saved state.
+            bool restoring = p->loaded->file == p->pendingFile;
+            if (auto xml = juce::XmlDocument::parse (beatMemoryFile (p->loaded->file)))
+            {
+                p->readBeatState (juce::ValueTree::fromXml (*xml));
+                p->pendingFile = p->loaded->file;
+                restoring = true;
+            }
 
             // The hits as they were fixed by hand last time.
             if (restoring && ! p->pendingHits.empty())
@@ -240,8 +288,34 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
             p->region = {};
             p->player.setLoop (p->player.isLooping(), {});
 
+            p->listenRebuilt = false;
+            p->rebuiltAtDevice.reset();
+            p->tempoFactor = 1.0;
+            p->keepPitch = false;
+            p->chooseDefaultSounds();
+            if (restoring && p->pendingRebuild.isValid())
+            {
+                const auto& r = p->pendingRebuild;
+                p->keepPitch = r.getProperty ("keepPitch", false);
+                p->tempoFactor = juce::jlimit (0.5, 2.0, (double) r.getProperty ("tempoFactor", 1.0));
+                const auto modes = r.getProperty ("modes").toString();
+                const auto files = juce::StringArray::fromTokens (r.getProperty ("fixed").toString(), "|", "");
+                for (int i = 0; i < drb::numInstruments; ++i)
+                {
+                    if (i < modes.length())
+                        p->pickModes[(size_t) i] = (drb::PickMode) juce::jlimit (0, 4, (int) (modes[i] - '0'));
+                    if (i < files.size() && files[i].isNotEmpty())
+                        p->fixedFiles[(size_t) i] = juce::File (files[i]);
+                }
+            }
+            p->pendingRebuild = {};
+
             if (std::abs (rate - p->preparedRate) < 0.5 || p->preparedRate <= 0.0)
-                p->player.setSource (std::move (result->playback));
+            {
+                p->originalAtDevice = std::move (result->playback);
+                p->player.setSource (std::make_unique<juce::AudioBuffer<float>> (*p->originalAtDevice));
+                p->requestRender();
+            }
             else
                 p->installPlayback();   // the device rate changed while we worked
             p->player.setPositionSeconds (0.0);
@@ -267,6 +341,7 @@ void DrumRebuilderProcessor::scaleTempo (double factor)
     g.bars = std::max (1, (int) std::ceil ((analysis.onsets.back().time - g.firstDownbeat + 0.05) / bar));
     tempoManual = true;
     updateMetronomeGrid();
+    requestRender();
     sendChangeMessage();
 }
 
@@ -602,6 +677,8 @@ void DrumRebuilderProcessor::hitsChanged()
                                                            / (g.timeSignature.beatsPerBar * g.beatSeconds())));
     }
 
+    requestRender();
+
     // Solo playing: hear the change, from where it was. Once the edits
     // pause for a moment, so a drag doesn't rebuild it at every step.
     if (auditionPlayer.isPlaying())
@@ -623,14 +700,15 @@ void DrumRebuilderProcessor::hitsChanged()
 void DrumRebuilderProcessor::setRegion (juce::Range<double> r)
 {
     region = r;
-    player.setLoop (player.isLooping(), region);
+    applyLoop();
     auditionPlayer.setLoop (player.isLooping(), region);
     sendChangeMessage();
 }
 
 void DrumRebuilderProcessor::setLooping (bool on)
 {
-    player.setLoop (on, region);
+    player.setLoop (on, {});
+    applyLoop();
     auditionPlayer.setLoop (on, region);
     sendChangeMessage();
 }
@@ -737,9 +815,260 @@ void DrumRebuilderProcessor::pauseSolo()
     sendChangeMessage();
 }
 
+// --- Rebuild ---------------------------------------------------------------
+
+void DrumRebuilderProcessor::rescanLibrary()
+{
+    library.rescan();
+    chooseDefaultSounds();
+    requestRender();
+    sendChangeMessage();
+}
+
+juce::String DrumRebuilderProcessor::getBeatName() const
+{
+    return loaded != nullptr ? loaded->file.getFileNameWithoutExtension() : juce::String();
+}
+
+int DrumRebuilderProcessor::saveOriginals()
+{
+    if (loaded == nullptr)
+        return 0;
+    std::vector<drb::Cut> cuts;
+    for (size_t i = 0; i < analysis.hits.size(); ++i)
+    {
+        const auto [in, out] = getSlice ((int) i);
+        cuts.push_back ({ analysis.hits[i].instrument, in, out });
+    }
+    const int written = library.saveOriginals (getBeatName(), loaded->audio, loaded->sampleRate, cuts);
+    chooseDefaultSounds();
+    requestRender();
+    sendChangeMessage();
+    return written;
+}
+
+std::vector<drb::SamplePtr> DrumRebuilderProcessor::getPool (drb::Instrument i) const
+{
+    const auto own = juce::File::createLegalFileName (getBeatName());
+    std::vector<drb::SamplePtr> pool;
+    for (const auto& s : library.samples (i))
+        if (! (s->original && s->fromBeat == own))
+            pool.push_back (s);
+    return pool;
+}
+
+// Instruments with sounds in their folder start on one of them (picked at
+// random), the others on their original sound. Choices still valid stay.
+void DrumRebuilderProcessor::chooseDefaultSounds()
+{
+    auto& random = juce::Random::getSystemRandom();
+    for (auto i : drb::allInstruments)
+    {
+        const auto pool = getPool (i);
+        auto& mode = pickModes[(size_t) i];
+        auto& fixed = fixedFiles[(size_t) i];
+        const bool fixedOk = std::any_of (pool.begin(), pool.end(), [&] (const auto& s) { return s->file == fixed; });
+
+        if (pool.empty())
+            mode = drb::PickMode::Original;
+        else if (! fixedOk)
+        {
+            fixed = pool[(size_t) random.nextInt ((int) pool.size())]->file;
+            if (mode == drb::PickMode::Original)
+                mode = drb::PickMode::Fixed;
+        }
+    }
+}
+
+void DrumRebuilderProcessor::setPickMode (drb::Instrument i, drb::PickMode m)
+{
+    pickModes[(size_t) i] = m;
+    requestRender();
+    sendChangeMessage();
+}
+
+drb::SamplePtr DrumRebuilderProcessor::getFixedSample (drb::Instrument i) const
+{
+    for (const auto& s : getPool (i))
+        if (s->file == fixedFiles[(size_t) i])
+            return s;
+    return nullptr;
+}
+
+void DrumRebuilderProcessor::setFixedSample (drb::Instrument i, const juce::File& f)
+{
+    fixedFiles[(size_t) i] = f;
+    if (pickModes[(size_t) i] == drb::PickMode::Original)
+        pickModes[(size_t) i] = drb::PickMode::Fixed;
+    requestRender();
+    sendChangeMessage();
+}
+
+void DrumRebuilderProcessor::nextSounds()
+{
+    auto& random = juce::Random::getSystemRandom();
+    seed = (juce::uint32) random.nextInt();
+    for (auto i : drb::allInstruments)
+    {
+        const auto pool = getPool (i);
+        if (pool.size() < 2 || pickModes[(size_t) i] == drb::PickMode::Original)
+            continue;
+        // Another one than now.
+        juce::File next;
+        do
+            next = pool[(size_t) random.nextInt ((int) pool.size())]->file;
+        while (next == fixedFiles[(size_t) i]);
+        fixedFiles[(size_t) i] = next;
+    }
+    requestRender();
+    sendChangeMessage();
+}
+
+void DrumRebuilderProcessor::setKeepPitch (bool on)
+{
+    keepPitch = on;
+    requestRender();
+    sendChangeMessage();
+}
+
+double DrumRebuilderProcessor::getRebuildBpm() const
+{
+    return analysis.grid.bpm * tempoFactor;
+}
+
+void DrumRebuilderProcessor::setRebuildBpm (double bpm)
+{
+    if (analysis.grid.bpm <= 0.0)
+        return;
+    tempoFactor = juce::jlimit (0.5, 2.0, bpm / analysis.grid.bpm);
+    requestRender();
+    sendChangeMessage();
+}
+
+void DrumRebuilderProcessor::setListeningRebuilt (bool on)
+{
+    const double before = timelineFactor();
+    listenRebuilt = on;
+    showSource (before);
+    sendChangeMessage();
+}
+
+drb::RebuildInput DrumRebuilderProcessor::makeRebuildInput() const
+{
+    drb::RebuildInput in;
+    in.audio = loaded != nullptr ? &loaded->audio : nullptr;
+    in.sampleRate = loaded != nullptr ? loaded->sampleRate : 44100.0;
+    in.hits = analysis.hits;
+    for (size_t i = 0; i < analysis.hits.size(); ++i)
+        in.slices.push_back (getSlice ((int) i));
+    return in;
+}
+
+drb::RebuildSettings DrumRebuilderProcessor::makeRebuildSettings() const
+{
+    drb::RebuildSettings settings;
+    for (auto i : drb::allInstruments)
+    {
+        auto& plan = settings.instruments[(size_t) i];
+        plan.mode = pickModes[(size_t) i];
+        if (plan.mode == drb::PickMode::Original)
+            continue;
+        plan.pool = getPool (i);
+        for (size_t k = 0; k < plan.pool.size(); ++k)
+            if (plan.pool[k]->file == fixedFiles[(size_t) i])
+                plan.fixed = (int) k;
+    }
+    settings.keepPitch = keepPitch;
+    settings.tempoFactor = tempoFactor;
+    settings.seed = seed;
+    return settings;
+}
+
+// Renders the rebuilt beat in the background once changes pause for a
+// moment; the newest request wins.
+void DrumRebuilderProcessor::requestRender()
+{
+    if (loaded == nullptr)
+        return;
+    scheduleBeatMemory();   // nearly every change comes through here
+    const int generation = ++renderGeneration;
+    rendering = true;
+    juce::WeakReference<DrumRebuilderProcessor> self (this);
+    juce::Timer::callAfterDelay (120, [self, generation]
+    {
+        if (self == nullptr || generation != self->renderGeneration || self->loaded == nullptr)
+            return;
+
+        struct Job
+        {
+            juce::AudioBuffer<float> audio;
+            drb::RebuildInput input;
+            drb::RebuildSettings settings;
+            double rate = 44100.0;
+            juce::AudioBuffer<float> result;
+        };
+        auto job = std::make_shared<Job>();
+        job->audio = self->loaded->audio;
+        job->input = self->makeRebuildInput();
+        job->input.audio = &job->audio;
+        job->settings = self->makeRebuildSettings();
+        job->rate = self->preparedRate > 0.0 ? self->preparedRate : 44100.0;
+
+        juce::Thread::launch ([self, generation, job]
+        {
+            job->result = drb::renderRebuild (job->input, job->settings, job->rate);
+            juce::MessageManager::callAsync ([self, generation, job]
+            {
+                if (self == nullptr || generation != self->renderGeneration)
+                    return;
+                const double before = self->timelineFactor();
+                self->rebuiltAtDevice = std::make_unique<juce::AudioBuffer<float>> (std::move (job->result));
+                self->rendering = false;
+                if (self->listenRebuilt)
+                    self->showSource (before);
+                self->sendChangeMessage();
+            });
+        });
+    });
+}
+
+void DrumRebuilderProcessor::exportRebuiltWav (const juce::File& file, std::function<void (bool)> done)
+{
+    if (loaded == nullptr)
+    {
+        done (false);
+        return;
+    }
+    struct Job
+    {
+        juce::AudioBuffer<float> audio;
+        drb::RebuildInput input;
+        drb::RebuildSettings settings;
+        double rate = 44100.0;
+        juce::File file;
+        std::function<void (bool)> done;
+    };
+    auto job = std::make_shared<Job>();
+    job->audio = loaded->audio;
+    job->input = makeRebuildInput();
+    job->input.audio = &job->audio;
+    job->settings = makeRebuildSettings();
+    job->rate = loaded->sampleRate;
+    job->file = file;
+    job->done = std::move (done);
+
+    juce::Thread::launch ([job]
+    {
+        const auto beat = drb::renderRebuild (job->input, job->settings, job->rate, 2.0);
+        const bool ok = drb::writeWav (job->file, beat, job->rate);
+        juce::MessageManager::callAsync ([job, ok] { job->done (ok); });
+    });
+}
+
 void DrumRebuilderProcessor::setCheck (drb::Instrument i, int state)
 {
     checks[(size_t) i] = state;
+    scheduleBeatMemory();
     sendChangeMessage();
 }
 
@@ -752,26 +1081,31 @@ void DrumRebuilderProcessor::setMetronome (bool on)
 void DrumRebuilderProcessor::updateMetronomeGrid()
 {
     const auto& g = analysis.grid;
-    metronome.setGrid (g.bpm, g.firstDownbeat, g.timeSignature.beatsPerBar);
+    const double f = timelineFactor();
+    metronome.setGrid (g.bpm * f, g.firstDownbeat / f, g.timeSignature.beatsPerBar);
 }
 
-void DrumRebuilderProcessor::getStateInformation (juce::MemoryBlock& dest)
+// Everything fixed by hand on the open beat: tempo, bar 1, the hits with
+// their instruments and IN / OUT, the checks, the rebuild's choices.
+juce::ValueTree DrumRebuilderProcessor::makeBeatState() const
 {
-    juce::ValueTree state ("DrumRebuilder");
-    state.setProperty ("metronome", metronome.isEnabled(), nullptr);
-    if (loaded != nullptr && tempoManual)
+    juce::ValueTree beat ("Beat");
+    if (loaded == nullptr)
+        return beat;
+
+    beat.setProperty ("file", loaded->file.getFullPathName(), nullptr);
+    if (tempoManual)
     {
-        state.setProperty ("bpm", analysis.grid.bpm, nullptr);
-        state.setProperty ("bar1", analysis.grid.firstDownbeat, nullptr);
+        beat.setProperty ("bpm", analysis.grid.bpm, nullptr);
+        beat.setProperty ("bar1", analysis.grid.firstDownbeat, nullptr);
     }
-    if (loaded != nullptr)
-    {
-        juce::StringArray c;
-        for (int v : checks)
-            c.add (juce::String (v));
-        state.setProperty ("checks", c.joinIntoString (""), nullptr);
-    }
-    if (loaded != nullptr && onsetsEdited)
+
+    juce::StringArray c;
+    for (int v : checks)
+        c.add (juce::String (v));
+    beat.setProperty ("checks", c.joinIntoString (""), nullptr);
+
+    if (onsetsEdited)
     {
         juce::StringArray items;   // time:instrument:velocity:in:out:likeness of kick,snare,hat closed,hat open
         for (const auto& h : analysis.hits)
@@ -779,12 +1113,99 @@ void DrumRebuilderProcessor::getStateInformation (juce::MemoryBlock& dest)
                        + ":" + juce::String (h.sliceIn, 4) + ":" + juce::String (h.sliceOut, 4) + ":"
                        + juce::String (h.likeness[0], 2) + "," + juce::String (h.likeness[1], 2) + ","
                        + juce::String (h.likeness[2], 2) + "," + juce::String (h.likeness[3], 2));
-        state.setProperty ("hitList", items.joinIntoString (" "), nullptr);
+        beat.setProperty ("hitList", items.joinIntoString (" "), nullptr);
     }
-    if (loaded != nullptr)
-        state.setProperty ("file", loaded->file.getFullPathName(), nullptr);
+
+    juce::ValueTree r ("Rebuild");
+    juce::String modes;
+    juce::StringArray files;
+    for (auto i : drb::allInstruments)
+    {
+        modes << (int) pickModes[(size_t) i];
+        files.add (fixedFiles[(size_t) i].getFullPathName());
+    }
+    r.setProperty ("modes", modes, nullptr);
+    r.setProperty ("fixed", files.joinIntoString ("|"), nullptr);
+    r.setProperty ("keepPitch", keepPitch, nullptr);
+    r.setProperty ("tempoFactor", tempoFactor, nullptr);
+    beat.addChild (r, -1, nullptr);
+    return beat;
+}
+
+// The other way: what makeBeatState() wrote becomes "pending", put back once
+// that file has been analysed again.
+void DrumRebuilderProcessor::readBeatState (const juce::ValueTree& beat)
+{
+    pendingFile = juce::File (beat.getProperty ("file").toString());
+    pendingBpm = beat.getProperty ("bpm", 0.0);
+    pendingDownbeat = beat.getProperty ("bar1", 0.0);
+    const auto c = beat.getProperty ("checks").toString();
+    for (int i = 0; i < drb::numInstruments; ++i)
+        pendingChecks[(size_t) i] = i < c.length() ? juce::jlimit (0, 2, (int) (c[i] - '0')) : 0;
+    pendingRebuild = beat.getChildWithName ("Rebuild").createCopy();
+    pendingHits.clear();
+    for (const auto& item : juce::StringArray::fromTokens (beat.getProperty ("hitList").toString(), " ", ""))
+    {
+        const auto parts = juce::StringArray::fromTokens (item, ":", "");
+        const int instrument = parts[1].getIntValue();
+        if (parts.size() >= 3 && juce::isPositiveAndBelow (instrument, drb::numInstruments))
+        {
+            drb::Hit h { parts[0].getDoubleValue(), (drb::Instrument) instrument, (float) parts[2].getDoubleValue(), 1.0f, true };
+            if (parts.size() >= 6)
+            {
+                h.sliceIn = (float) parts[3].getDoubleValue();
+                h.sliceOut = (float) parts[4].getDoubleValue();
+                const auto like = juce::StringArray::fromTokens (parts[5], ",", "");
+                for (int i = 0; i < like.size() && i < 4; ++i)
+                    h.likeness[(size_t) i] = (float) like[i].getDoubleValue();
+            }
+            pendingHits.push_back (h);
+        }
+    }
+}
+
+// Each beat remembers its own fixes, in a small file of its own, so opening
+// another beat and coming back loses nothing.
+juce::File DrumRebuilderProcessor::beatMemoryFile (const juce::File& audio)
+{
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+        .getChildFile ("Drum Rebuilder").getChildFile ("beats")
+        .getChildFile (juce::String::toHexString (audio.getFullPathName().hashCode64()) + ".xml");
+}
+
+void DrumRebuilderProcessor::saveBeatMemory()
+{
+    if (loaded == nullptr)
+        return;
+    const auto file = beatMemoryFile (loaded->file);
+    if (file.getParentDirectory().createDirectory())
+        if (auto xml = makeBeatState().createXml())
+            xml->writeTo (file);
+}
+
+void DrumRebuilderProcessor::scheduleBeatMemory()
+{
+    const int generation = ++memoryGeneration;
+    juce::WeakReference<DrumRebuilderProcessor> self (this);
+    juce::Timer::callAfterDelay (400, [self, generation]
+    {
+        if (self != nullptr && generation == self->memoryGeneration)
+            self->saveBeatMemory();
+    });
+}
+
+void DrumRebuilderProcessor::getStateInformation (juce::MemoryBlock& dest)
+{
+    juce::ValueTree state ("DrumRebuilder");
+    state.setProperty ("metronome", metronome.isEnabled(), nullptr);
     if (browseFolder != juce::File())
         state.setProperty ("browseFolder", browseFolder.getFullPathName(), nullptr);
+    if (loaded != nullptr)
+    {
+        state.setProperty ("file", loaded->file.getFullPathName(), nullptr);
+        state.addChild (makeBeatState(), -1, nullptr);
+        saveBeatMemory();
+    }
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, dest);
 }
@@ -804,31 +1225,10 @@ void DrumRebuilderProcessor::setStateInformation (const void* data, int size)
     const juce::File file (state.getProperty ("file").toString());
     if (file.existsAsFile())
     {
+        // Older states kept the beat's fixes on the top level.
+        auto beat = state.getChildWithName ("Beat");
+        readBeatState (beat.isValid() ? beat : state);
         pendingFile = file;
-        pendingBpm = state.getProperty ("bpm", 0.0);
-        pendingDownbeat = state.getProperty ("bar1", 0.0);
-        const auto c = state.getProperty ("checks").toString();
-        for (int i = 0; i < drb::numInstruments; ++i)
-            pendingChecks[(size_t) i] = i < c.length() ? juce::jlimit (0, 2, (int) (c[i] - '0')) : 0;
-        pendingHits.clear();
-        for (const auto& item : juce::StringArray::fromTokens (state.getProperty ("hitList").toString(), " ", ""))
-        {
-            const auto parts = juce::StringArray::fromTokens (item, ":", "");
-            const int instrument = parts[1].getIntValue();
-            if (parts.size() >= 3 && juce::isPositiveAndBelow (instrument, drb::numInstruments))
-            {
-                drb::Hit h { parts[0].getDoubleValue(), (drb::Instrument) instrument, (float) parts[2].getDoubleValue(), 1.0f, true };
-                if (parts.size() >= 6)
-                {
-                    h.sliceIn = (float) parts[3].getDoubleValue();
-                    h.sliceOut = (float) parts[4].getDoubleValue();
-                    const auto like = juce::StringArray::fromTokens (parts[5], ",", "");
-                    for (int i = 0; i < like.size() && i < 4; ++i)
-                        h.likeness[(size_t) i] = (float) like[i].getDoubleValue();
-                }
-                pendingHits.push_back (h);
-            }
-        }
         juce::WeakReference<DrumRebuilderProcessor> self (this);
         juce::MessageManager::callAsync ([self, file]
         {

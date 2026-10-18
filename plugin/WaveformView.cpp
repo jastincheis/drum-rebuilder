@@ -117,7 +117,7 @@ void WaveformView::zoomBy (double factor, double around)
 
 double WaveformView::zoomCentre() const
 {
-    const double pos = processor.getPlayer().getPositionSeconds();
+    const double pos = processor.getPlayheadSeconds();
     return pos >= viewStart && pos <= viewEnd ? pos : centreSeconds();
 }
 
@@ -133,10 +133,9 @@ void WaveformView::scrollToShow (double seconds)
 void WaveformView::jumpToHit (int direction)
 {
     const auto& onsets = processor.getAnalysis().onsets;
-    auto& player = processor.getPlayer();
     auto& solo = processor.getAuditionPlayer();
     const bool soloPlaying = processor.isSoloPlaying();
-    const double pos = soloPlaying ? solo.getPositionSeconds() : player.getPositionSeconds();
+    const double pos = soloPlaying ? solo.getPositionSeconds() : processor.getPlayheadSeconds();
 
     // On the Instruments tab with instruments on solo: only their hits.
     const bool onlySolo = instrumentMode && ! focus.empty();
@@ -168,7 +167,7 @@ void WaveformView::jumpToHit (int direction)
         target = direction > 0 ? duration : 0.0;
     }
 
-    player.setPositionSeconds (*target);
+    processor.setPlayheadSeconds (*target);
     if (soloPlaying)
         solo.setPositionSeconds (*target);
     scrollToShow (*target);
@@ -463,7 +462,7 @@ void WaveformView::paint (juce::Graphics& g)
 
     // Playhead (the checked instrument's, while listening to it).
     const bool auditioning = processor.isSoloPlaying();
-    const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayer().getPositionSeconds();
+    const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayheadSeconds();
     if (pos >= viewStart && pos <= viewEnd)
     {
         const auto solo = processor.firstSolo();
@@ -668,13 +667,12 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
     if (e.mods.isPopupMenu() || processor.getLoaded() == nullptr)
         return;
 
-    auto& player = processor.getPlayer();
     if (grab != Grab::none)
     {
         // Moved a flag or a hit: nothing else. A plain click on the flag
         // plays from there; on a hit's marker it asks what the hit really is.
         if (! dragging && grab == Grab::flag)
-            player.setPositionSeconds (processor.getAnalysis().grid.firstDownbeat);
+            processor.setPlayheadSeconds (processor.getAnalysis().grid.firstDownbeat);
         else if (! dragging)
         {
             const int index = grabbedHit;
@@ -685,13 +683,13 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
     else if (dragging)
     {
         // Play from the start of the new region.
-        player.setPositionSeconds (processor.getRegion().getStart());
+        processor.setPlayheadSeconds (processor.getRegion().getStart());
     }
     else
     {
         // A click clears the region and moves the playhead there.
         processor.setRegion ({});
-        player.setPositionSeconds (dragAnchor);
+        processor.setPlayheadSeconds (dragAnchor);
     }
     dragging = false;
     grab = Grab::none;
@@ -907,7 +905,7 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
 
     processor.setRegion ({ start, end });
     auto& player = processor.getPlayer();
-    player.setPositionSeconds (start);
+    processor.setPlayheadSeconds (start);
     processor.stopPreview();
     player.play();
     repaint();
@@ -941,7 +939,7 @@ void WaveformView::scrollBarMoved (juce::ScrollBar*, double newStart)
 void WaveformView::timerCallback()
 {
     const bool auditioning = processor.isSoloPlaying();
-    const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayer().getPositionSeconds();
+    const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayheadSeconds();
     if (std::abs (pos - lastPlayhead) < 1.0e-4)
         return;
     lastPlayhead = pos;

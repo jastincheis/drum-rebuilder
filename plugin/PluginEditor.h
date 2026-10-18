@@ -7,6 +7,8 @@ class ImportPage;
 class AnalysisPage;
 class InstrumentsPage;
 class MidiEditorPage;
+class SampleBrowserPage;
+class DrumRackPage;
 class ExportPage;
 
 class DrumRebuilderEditor : public juce::AudioProcessorEditor,
@@ -45,6 +47,8 @@ private:
     AnalysisPage* analysisPage = nullptr;   // owned by tabs
     InstrumentsPage* instrumentsPage = nullptr;   // owned by tabs
     MidiEditorPage* midiPage = nullptr;     // owned by tabs
+    SampleBrowserPage* samplePage = nullptr;   // owned by tabs
+    DrumRackPage* rackPage = nullptr;          // owned by tabs
     ExportPage* exportPage = nullptr;       // owned by tabs
 
     std::unique_ptr<juce::FileChooser> chooser;
