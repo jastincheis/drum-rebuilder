@@ -184,6 +184,7 @@ Beat makeBeat (const BeatSpec& spec)
     const double beatSec = 60.0 / spec.bpm;
     const double leadIn = 0.1;
     const int swingUnit = spec.style == Style::Funk ? 1 : 2;   // sixteenth or eighth swing
+    beat.firstDownbeat = leadIn;
 
     for (const auto& e : pattern (spec.style, spec.bars))
     {

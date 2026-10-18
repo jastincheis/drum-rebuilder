@@ -35,6 +35,7 @@ struct Beat
     BeatSpec spec;
     juce::AudioBuffer<float> audio;   // stereo
     std::vector<Hit> truth;           // sorted by time
+    double firstDownbeat = 0.0;       // seconds, where bar 1 starts on the grid
 };
 
 Beat makeBeat (const BeatSpec&);

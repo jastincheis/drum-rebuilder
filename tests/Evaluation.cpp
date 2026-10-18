@@ -47,12 +47,14 @@ Score match (const std::vector<double>& truth, const std::vector<double>& found,
     return s;
 }
 
-// Hits closer than 10 ms are one onset (a kick and a hat played together).
+// Hits closer than 25 ms are one onset (a kick and a hat played together,
+// or a flam): the onset detector doesn't split attacks closer than that.
+// Each instrument still gets scored on its own times.
 std::vector<double> onsetTimes (const std::vector<Hit>& hits)
 {
     std::vector<double> t;
     for (const auto& h : hits)
-        if (t.empty() || h.time - t.back() > 0.010)
+        if (t.empty() || h.time - t.back() > 0.025)
             t.push_back (h.time);
     return t;
 }
@@ -87,12 +89,17 @@ double Score::f() const
     return p + r <= 0.0 ? 0.0 : 2.0 * p * r / (p + r);
 }
 
-Report evaluate (const std::vector<Hit>& truth, double bpmTruth,
-                 const AnalysisResult& detected, double toleranceSec)
+Report evaluate (const Truth& t, const AnalysisResult& detected, double toleranceSec)
 {
+    const auto& truth = t.hits;
     Report r;
-    std::vector<double> errors;
-    r.onsets = match (onsetTimes (truth), onsetTimes (detected.hits), toleranceSec, &errors);
+    std::vector<double> errors, found;
+    if (detected.onsets.empty())
+        found = onsetTimes (detected.hits);
+    else
+        for (const auto& o : detected.onsets)
+            found.push_back (o.time);
+    r.onsets = match (onsetTimes (truth), found, toleranceSec, &errors);
 
     double sum = 0.0;
     for (double e : errors)
@@ -102,11 +109,14 @@ Report evaluate (const std::vector<Hit>& truth, double bpmTruth,
     for (auto inst : allInstruments)
         r.instruments[(size_t) inst] = match (timesOf (truth, inst), timesOf (detected.hits, inst), toleranceSec);
 
-    r.bpmTruth = bpmTruth;
-    r.bpmDetected = detected.bpm;
-    r.bpmCorrect = within (detected.bpm, bpmTruth, 0.02);
+    const double bpm = detected.grid.bpm;
+    r.bpmTruth = t.bpm;
+    r.bpmDetected = bpm;
+    r.bpmCorrect = within (bpm, t.bpm, 0.02);
     r.bpmOctaveError = ! r.bpmCorrect
-                    && (within (detected.bpm, bpmTruth * 2.0, 0.02) || within (detected.bpm, bpmTruth / 2.0, 0.02));
+                    && (within (bpm, t.bpm * 2.0, 0.02) || within (bpm, t.bpm / 2.0, 0.02));
+    r.barsCorrect = detected.grid.bars == t.bars;
+    r.downbeatErrorMs = 1000.0 * std::abs (detected.grid.firstDownbeat - t.firstDownbeat);
     return r;
 }
 

@@ -27,9 +27,18 @@ struct Report
     double bpmTruth = 0.0, bpmDetected = 0.0;
     bool bpmCorrect = false;                       // within 2 %
     bool bpmOctaveError = false;                   // half or double, within 2 %
+    bool barsCorrect = false;
+    double downbeatErrorMs = 0.0;                  // where bar 1 starts
 };
 
-Report evaluate (const std::vector<Hit>& truth, double bpmTruth,
-                 const AnalysisResult& detected, double toleranceSec = 0.030);
+struct Truth
+{
+    std::vector<Hit> hits;
+    double bpm = 0.0;
+    int bars = 0;
+    double firstDownbeat = 0.0;
+};
+
+Report evaluate (const Truth&, const AnalysisResult& detected, double toleranceSec = 0.030);
 
 } // namespace drb::test

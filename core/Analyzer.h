@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Model.h"
+#include "Onsets.h"
+#include "Tempo.h"
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
@@ -9,11 +11,9 @@ namespace drb
 
 struct AnalysisResult
 {
-    double bpm = 0.0;            // 0 = not detected
-    TimeSignature timeSignature;
-    int bars = 0;
-    double firstDownbeat = 0.0;  // seconds
-    std::vector<Hit> hits;       // sorted by time
+    BeatGrid grid;               // tempo, bars, downbeat
+    std::vector<Onset> onsets;   // every attack, sorted by time
+    std::vector<Hit> hits;       // onsets with instruments (stage 2), sorted by time
 };
 
 // Runs offline on a background thread, never on the audio thread.

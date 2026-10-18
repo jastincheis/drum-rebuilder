@@ -8,8 +8,14 @@ hi-hats, clap, rimshot, toms, crash, ride) with velocity, swing and
 microtiming, turns them into editable MIDI, and rebuilds the beat with your own
 samples while keeping the groove.
 
-**Status: stage 0** — project skeleton, empty plugin window, test beats and
-scoring. Nothing is detected yet.
+**Status: stage 1 (in progress)** — browse and preview files, open a recording,
+see its waveform with the bar and beat grid and every detected hit, play /
+pause / stop, loop a region or a single hit, zoom, metronome. Tempo, bars and
+hits are detected and can be fixed by hand (drag bar 1 and the hits);
+instruments are not yet (stage 2).
+
+Keys: Space play / pause, W / E start / end, Left / Right previous / next hit,
+Up / Down zoom.
 
 ## Plan
 
