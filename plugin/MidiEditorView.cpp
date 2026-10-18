@@ -104,6 +104,28 @@ int MidiEditorView::hitAt (juce::Point<int> p) const
     return best;
 }
 
+// A hit's bar: taller (from the row's middle out) the harder it is hit.
+juce::Rectangle<float> MidiEditorView::hitBox (int index) const
+{
+    const auto& h = processor.getAnalysis().hits[(size_t) index];
+    const auto r = laneBounds (laneOf (h.instrument));
+    const float height = (float) r.getHeight() * (0.25f + 0.6f * h.velocity);
+    return { secondsToX (h.time) - 1.0f, (float) r.getCentreY() - height / 2.0f, 9.0f, height };
+}
+
+juce::Rectangle<int> MidiEditorView::soloButton (int lane) const
+{
+    const auto r = laneBounds (lane);
+    return { headerWidth - 34, r.getCentreY() - 11, 26, 22 };
+}
+
+// On a hit's top or bottom edge: dragging there sets how hard it is hit.
+bool MidiEditorView::onVelocityEdge (int index, juce::Point<int> p) const
+{
+    const auto box = hitBox (index);
+    return std::abs ((float) p.y - box.getY()) <= 5.0f || std::abs ((float) p.y - box.getBottom()) <= 5.0f;
+}
+
 double MidiEditorView::place (double seconds, bool free) const
 {
     const auto& grid = processor.getAnalysis().grid;
@@ -153,7 +175,7 @@ void MidiEditorView::zoomBy (double factor, double around)
 
 double MidiEditorView::zoomCentre() const
 {
-    const double pos = processor.getPlayheadSeconds();
+    const double pos = processor.getShownPlayheadSeconds();
     return pos >= viewStart && pos <= viewEnd ? pos : (viewStart + viewEnd) * 0.5;
 }
 
@@ -179,14 +201,24 @@ void MidiEditorView::paint (juce::Graphics& g)
         int count = 0;
         for (const auto& h : hits)
             count += h.instrument == lanes[(size_t) l] ? 1 : 0;
-        const auto name = juce::Rectangle<int> (0, r.getY(), headerWidth, r.getHeight()).reduced (10, 0);
+        const auto name = juce::Rectangle<int> (0, r.getY(), headerWidth - 36, r.getHeight()).withTrimmedLeft (10);
         g.setColour (theme::instrument (lanes[(size_t) l]));
         g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
-        g.drawText (drb::instrumentName (lanes[(size_t) l]), name.withTrimmedBottom (r.getHeight() - r.getHeight() / 2 + 1), juce::Justification::bottomLeft);
+        g.drawFittedText (drb::instrumentName (lanes[(size_t) l]), name.withTrimmedBottom (r.getHeight() - r.getHeight() / 2 + 1),
+                          juce::Justification::bottomLeft, 1, 0.75f);
         g.setColour (theme::textDim);
         g.setFont (juce::FontOptions (12.0f));
         g.drawText (juce::String (count) + (count == 1 ? " hit" : " hits"), name.withTrimmedTop (r.getHeight() / 2 + 2),
                     juce::Justification::topLeft);
+
+        // S: solo this row.
+        const auto sb = soloButton (l).toFloat();
+        const bool on = processor.isSolo (lanes[(size_t) l]);
+        g.setColour (on ? theme::instrument (lanes[(size_t) l]) : theme::panelLight);
+        g.fillRoundedRectangle (sb, 4.0f);
+        g.setColour (on ? juce::Colours::black : theme::textDim);
+        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        g.drawText ("S", sb, juce::Justification::centred);
     }
 
     if (processor.getLoaded() == nullptr)
@@ -236,7 +268,9 @@ void MidiEditorView::paint (juce::Graphics& g)
         }
     }
 
-    // Hits: taller and brighter when harder; "?" when the analysis is unsure.
+    // Hits: taller and brighter when harder; "?" when the analysis is unsure;
+    // faded when other rows are on solo.
+    const bool anySolo = processor.anySolo();
     g.saveState();
     g.reduceClipRegion (area);
     for (size_t i = 0; i < hits.size(); ++i)
@@ -246,12 +280,11 @@ void MidiEditorView::paint (juce::Graphics& g)
         if (lane < 0 || h.time < viewStart - 0.1 || h.time > viewEnd + 0.1)
             continue;
 
-        const auto r = laneBounds (lane);
         const float x = secondsToX (h.time);
-        const float height = (float) r.getHeight() * (0.25f + 0.6f * h.velocity);
-        const auto box = juce::Rectangle<float> (x - 1.0f, (float) r.getCentreY() - height / 2.0f, 9.0f, height);
+        const auto box = hitBox ((int) i);
         const auto colour = theme::instrument (h.instrument);
-        g.setColour (colour.withAlpha (0.45f + 0.55f * h.velocity));
+        const bool muted = anySolo && ! processor.isSolo (h.instrument);
+        g.setColour (colour.withAlpha (muted ? 0.15f : 0.45f + 0.55f * h.velocity));
         g.fillRoundedRectangle (box, 2.0f);
         if ((int) i == selected)
         {
@@ -268,7 +301,7 @@ void MidiEditorView::paint (juce::Graphics& g)
     g.restoreState();
 
     // Playhead.
-    const double pos = processor.getPlayheadSeconds();
+    const double pos = processor.getShownPlayheadSeconds();
     if (pos >= viewStart && pos <= viewEnd)
     {
         g.setColour (theme::accent);
@@ -280,9 +313,17 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
 {
     grabKeyboardFocus();
     dragHit = -1;
-    dragMoved = justAdded = false;
+    dragMoved = justAdded = velocityDrag = false;
     if (processor.getLoaded() == nullptr)
         return;
+
+    for (int l = 0; l < numLanes(); ++l)
+        if (soloButton (l).contains (e.getPosition()))
+        {
+            processor.setSolo (lanes[(size_t) l], ! processor.isSolo (lanes[(size_t) l]));
+            repaint();
+            return;
+        }
 
     const int hit = hitAt (e.getPosition());
     if (e.mods.isPopupMenu())
@@ -300,6 +341,7 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
     {
         selected = dragHit = hit;
         dragOffset = xToSeconds ((float) e.x) - processor.getAnalysis().hits[(size_t) hit].time;
+        velocityDrag = onVelocityEdge (hit, e.getPosition());
     }
     else if (const int lane = laneAt (e.y); lane >= 0 && e.x >= laneArea().getX() && e.getNumberOfClicks() == 1)
     {
@@ -324,10 +366,34 @@ void MidiEditorView::mouseDrag (const juce::MouseEvent& e)
         processor.beginHitEdit();   // the whole drag is one undo step
     dragMoved = true;
 
+    if (velocityDrag)
+    {
+        // The bar's half-height from the row's middle sets it.
+        const auto r = laneBounds (laneOf (processor.getAnalysis().hits[(size_t) dragHit].instrument));
+        const float half = std::abs ((float) e.y - (float) r.getCentreY());
+        processor.setHitVelocity (dragHit, juce::jlimit (0.05f, 1.0f, (2.0f * half / (float) r.getHeight() - 0.25f) / 0.6f), false);
+        repaint();
+        return;
+    }
+
     const int lane = juce::jlimit (0, numLanes() - 1, laneAt (juce::jlimit (laneArea().getY(), laneArea().getBottom() - 1, e.y)));
     const double t = place (xToSeconds ((float) e.x) - dragOffset, e.mods.isAltDown());
     selected = dragHit = processor.moveHitTo (dragHit, t, lanes[(size_t) lane]);
     repaint();
+}
+
+void MidiEditorView::mouseMove (const juce::MouseEvent& e)
+{
+    for (int l = 0; l < numLanes(); ++l)
+        if (soloButton (l).contains (e.getPosition()))
+        {
+            setMouseCursor (juce::MouseCursor::PointingHandCursor);
+            return;
+        }
+    const int hit = processor.getLoaded() != nullptr ? hitAt (e.getPosition()) : -1;
+    setMouseCursor (hit >= 0 && onVelocityEdge (hit, e.getPosition()) ? juce::MouseCursor::UpDownResizeCursor
+                    : hit >= 0                                         ? juce::MouseCursor::LeftRightResizeCursor
+                                                                       : juce::MouseCursor::NormalCursor);
 }
 
 void MidiEditorView::mouseUp (const juce::MouseEvent& e)
@@ -411,12 +477,12 @@ void MidiEditorView::scrollBarMoved (juce::ScrollBar*, double newStart)
 
 void MidiEditorView::timerCallback()
 {
-    const double pos = processor.getPlayheadSeconds();
+    const double pos = processor.getShownPlayheadSeconds();
     if (std::abs (pos - lastPlayhead) < 1.0e-4)
         return;
     lastPlayhead = pos;
 
-    if (processor.getPlayer().isPlaying() && (pos > viewEnd || pos < viewStart))
+    if (processor.isAnythingPlaying() && (pos > viewEnd || pos < viewStart))
     {
         const double len = viewEnd - viewStart;
         setView (pos - len * 0.05, pos + len * 0.95);

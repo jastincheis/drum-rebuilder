@@ -47,6 +47,21 @@ struct Hit
     // from `time`, when set by hand; sliceOut <= sliceIn = automatic.
     float sliceIn = 0.0f, sliceOut = 0.0f;
 
+    // Where this hit's own sound is in the recording, when that is not at
+    // `time`: after it was moved in the MIDI editor or quantized (the sound
+    // goes along), or added by hand (it borrows its instrument's loudest
+    // hit). < 0 = at `time`.
+    double source = -1.0;
+    bool added = false;   // added by hand, not found by the analysis
+
+    // The velocity its own sound was played at in the recording, once the
+    // velocity was changed by hand (< 0 = unchanged): its sound is then
+    // played that much louder or softer.
+    float soundVelocity = -1.0f;
+    float soundGain() const { return soundVelocity > 0.0f ? velocity / soundVelocity : 1.0f; }
+
+    double sourceTime() const { return source >= 0.0 ? source : time; }
+
     // How much the sound at this time fits each instrument, 0..1, from the
     // analysis (all 0 when unknown). Used to suggest what else it could be.
     std::array<float, numInstruments> likeness {};

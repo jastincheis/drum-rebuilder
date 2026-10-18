@@ -166,6 +166,46 @@ void checkRebuild()
     }
     check (ref > 0.0 && err / ref < 1.0e-3, "rebuild from the originals = the beat (no doubled hits)");
 
+    // 1b. A kick moved by hand (MIDI editor) takes its sound along.
+    {
+        RebuildInput moved;
+        moved.audio = &beat.audio;
+        moved.sampleRate = sr;
+        for (size_t i = 0; i < input.hits.size(); ++i)
+            if (input.hits[i].instrument == Instrument::Kick)
+            {
+                auto h = input.hits[i];
+                h.source = h.time;
+                h.time += 0.25;
+                moved.hits.push_back (h);
+                moved.slices.push_back (input.slices[i]);
+                break;
+            }
+        const auto out = renderRebuild (moved, RebuildSettings(), sr, 0.0);
+        const int to = (int) (moved.hits[0].time * sr), from = (int) (moved.hits[0].source * sr);
+        const float atNew = out.getMagnitude (0, to, (int) (0.05 * sr));
+        const float atOld = out.getMagnitude (0, from, (int) (0.05 * sr));
+        const float original = beat.audio.getMagnitude (0, from, (int) (0.05 * sr));
+        check (std::abs (atNew - original) < 0.02f * original && atOld < 0.01f * original,
+               "a moved hit plays its own sound at its new time");
+    }
+
+    // 1c. A hit made softer by hand: its own sound plays softer.
+    {
+        RebuildInput one;
+        one.audio = &beat.audio;
+        one.sampleRate = sr;
+        auto h = input.hits[0];
+        h.soundVelocity = h.velocity;
+        h.velocity *= 0.5f;
+        one.hits.push_back (h);
+        one.slices.push_back (input.slices[0]);
+        const auto out = renderRebuild (one, RebuildSettings(), sr, 0.0);
+        const int at = (int) (h.time * sr) + (int) (0.003 * sr);
+        const float got = out.getMagnitude (0, at, (int) (0.03 * sr)), was = beat.audio.getMagnitude (0, at, (int) (0.03 * sr));
+        check (std::abs (got / was - 0.5f) < 0.02f, "a hit made half as hard plays its sound half as loud");
+    }
+
     // 2. A click for every instrument, twice the tempo: hits at half the time.
     auto click = std::make_shared<Sample>();
     click->audio.setSize (1, (int) (0.01 * sr));

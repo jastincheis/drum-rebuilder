@@ -622,8 +622,8 @@ public:
         fit.onClick = [this] { view.zoomToFit(); };
 
         setupLabel (hint, theme::textDim, 12.5f);
-        hint.setText ("Click an empty spot: add a hit    Drag: move it (onto another row: change the instrument, Alt: off the grid)"
-                      "    Double-click or Delete: remove    Right-click: how hard    Ctrl+Z: undo",
+        hint.setText ("S: solo    Click an empty spot: add a hit    Drag: move it (onto another row: change the instrument)"
+                      "    Drag its top / bottom: harder / softer    Double-click or Delete: remove    Ctrl+Z: undo",
                       juce::dontSendNotification);
         addAndMakeVisible (hint);
         update();
@@ -1540,7 +1540,8 @@ void DrumRebuilderEditor::togglePlay()
         processor.pauseSolo();
     else if (player.isPlaying())
         player.pause();
-    else if (tabs.getCurrentContentComponent() == instrumentsPage && processor.anySolo())
+    else if ((tabs.getCurrentContentComponent() == instrumentsPage || tabs.getCurrentContentComponent() == midiPage)
+             && processor.anySolo())
         processor.playSolo();
     else
     {

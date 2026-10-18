@@ -48,7 +48,7 @@ struct RebuildInput
     const juce::AudioBuffer<float>* audio = nullptr;
     double sampleRate = 44100.0;
     std::vector<Hit> hits;                          // sorted by time
-    std::vector<std::pair<double, double>> slices;  // one per hit
+    std::vector<std::pair<double, double>> slices;  // one per hit, around its sourceTime()
 };
 
 // The whole rebuilt beat at `outputRate`, stereo, with `tailSeconds` after

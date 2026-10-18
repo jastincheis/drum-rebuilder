@@ -82,12 +82,13 @@ public:
     int moveHitTo (int hitIndex, double seconds, drb::Instrument);   // returns its new index
     void deleteHitAt (int hitIndex);
     int addHitAt (double seconds, drb::Instrument, float velocity);  // returns its index
-    void setHitVelocity (int hitIndex, float velocity);
+    void setHitVelocity (int hitIndex, float velocity, bool undoStep = true);
 
     // IN / OUT of one instrument hit: where its sound starts and ends.
     // Automatic until set: from the hit to the next hit of anything (at most
     // 0.4 s). Drags call beginHitEdit() first.
-    std::pair<double, double> getSlice (int hitIndex) const;
+    std::pair<double, double> getSlice (int hitIndex) const;         // around the hit's time
+    std::pair<double, double> getSourceSlice (int hitIndex) const;   // where its sound is in the recording
     void setSlice (int hitIndex, double in, double out);
     int findHit (double time, drb::Instrument) const;   // -1 = none
     void quantizeHits (double divisionBeats, double strength);
@@ -106,6 +107,13 @@ public:
     // plays at another tempo): what the views show and set.
     double getPlayheadSeconds() const { return player.getPositionSeconds() * timelineFactor(); }
     void setPlayheadSeconds (double t) { player.setPositionSeconds (t / timelineFactor()); }
+
+    // What the views draw: the solo playback's position while it plays.
+    double getShownPlayheadSeconds() const
+    {
+        return auditionPlayer.isPlaying() ? auditionPlayer.getPositionSeconds() : getPlayheadSeconds();
+    }
+    bool isAnythingPlaying() const { return player.isPlaying() || auditionPlayer.isPlaying(); }
 
     juce::Range<double> getRegion() const { return region; }
     void setRegion (juce::Range<double>);   // empty = none
@@ -240,6 +248,8 @@ private:
 
     void hitsChanged();   // after a manual edit
     void rebuildOnsets(); // one onset per distinct hit time
+    double borrowedSource (drb::Instrument) const;   // the sound a hit added by hand plays
+    float borrowedVelocity (drb::Instrument) const;
 
     void installPlayback();
     void buildSoloAudio();   // the solo instruments' hits, at the device rate

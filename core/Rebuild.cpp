@@ -131,7 +131,8 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
             for (size_t g = h; g < hits.size() && hits[g].time < hit.time + 1.0e-9; ++g)
             {
                 const auto& p = settings.instruments[(size_t) hits[g].instrument];
-                if (! done[g] && (p.mode == PickMode::Original || p.pool.empty()))
+                if (! done[g] && (p.mode == PickMode::Original || p.pool.empty())
+                    && std::abs (hits[g].sourceTime() - hit.sourceTime()) < 1.0e-9)
                     group.push_back (g);
             }
 
@@ -151,9 +152,10 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
             {
                 const auto [ga, gb] = range (g);
                 for (int i = ga; i < gb; ++i)
-                    envelope[(size_t) (i - a)] = std::max (envelope[(size_t) (i - a)], gate (i, ga, gb, fadeIn, fadeOut));
+                    envelope[(size_t) (i - a)] = std::max (envelope[(size_t) (i - a)],
+                                                           gate (i, ga, gb, fadeIn, fadeOut) * hits[g].soundGain());
             }
-            const double start = hit.time / f + (a / sr - hit.time);
+            const double start = hit.time / f + (a / sr - hit.sourceTime());
             addVoice (out, outputRate, start, src, sr, a, b, 1.0, 1.0f, &envelope);
             continue;
         }

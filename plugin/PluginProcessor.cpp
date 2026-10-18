@@ -393,7 +393,10 @@ double DrumRebuilderProcessor::moveOnset (int index, double seconds)
     for (auto& h : analysis.hits)
         if (std::abs (h.time - from) < 1.0e-9)
         {
+            // A correction: the sound really is where the marker goes.
             h.time = to;
+            if (! h.added)
+                h.source = -1.0;
             h.manual = true;
         }
     hitsChanged();
@@ -434,6 +437,9 @@ void DrumRebuilderProcessor::toggleInstrument (int index, drb::Instrument instru
             if (std::abs (h.time - t) < 1.0e-9)
                 velocity = h.velocity;
         drb::Hit hit { t, instrument, velocity, 1.0f, true };
+        hit.added = true;
+        hit.source = borrowedSource (instrument);
+        hit.soundVelocity = borrowedVelocity (instrument);
         hits.insert (std::upper_bound (hits.begin(), hits.end(), hit,
                                        [] (const drb::Hit& a, const drb::Hit& b) { return a.time < b.time; }),
                      hit);
@@ -524,6 +530,8 @@ int DrumRebuilderProcessor::moveHitTo (int hitIndex, double seconds, drb::Instru
         return hitIndex;
 
     auto hit = hits[(size_t) hitIndex];
+    if (hit.source < 0.0)
+        hit.source = hit.time;   // its sound stays where it is in the recording
     hit.time = juce::jlimit (0.0, loaded != nullptr ? loaded->audio.getNumSamples() / loaded->sampleRate : seconds, seconds);
     hit.instrument = instrument;
     hit.manual = true;
@@ -548,7 +556,10 @@ int DrumRebuilderProcessor::addHitAt (double seconds, drb::Instrument instrument
 {
     beginHitEdit();
     auto& hits = analysis.hits;
-    const drb::Hit hit { std::max (0.0, seconds), instrument, velocity, 1.0f, true };
+    drb::Hit hit { std::max (0.0, seconds), instrument, velocity, 1.0f, true };
+    hit.added = true;
+    hit.source = borrowedSource (instrument);
+    hit.soundVelocity = borrowedVelocity (instrument);
     const auto it = hits.insert (std::upper_bound (hits.begin(), hits.end(), hit, earlier), hit);
     const int index = (int) (it - hits.begin());
     rebuildOnsets();
@@ -556,11 +567,15 @@ int DrumRebuilderProcessor::addHitAt (double seconds, drb::Instrument instrument
     return index;
 }
 
-void DrumRebuilderProcessor::setHitVelocity (int hitIndex, float velocity)
+void DrumRebuilderProcessor::setHitVelocity (int hitIndex, float velocity, bool undoStep)
 {
     if (! juce::isPositiveAndBelow (hitIndex, (int) analysis.hits.size()))
         return;
-    beginHitEdit();
+    if (undoStep)
+        beginHitEdit();
+    auto& h = analysis.hits[(size_t) hitIndex];
+    if (h.soundVelocity < 0.0f)
+        h.soundVelocity = h.velocity;   // how loud its sound is in the recording
     analysis.hits[(size_t) hitIndex].velocity = juce::jlimit (0.05f, 1.0f, velocity);
     analysis.hits[(size_t) hitIndex].manual = true;
     hitsChanged();
@@ -576,6 +591,36 @@ std::pair<double, double> DrumRebuilderProcessor::getSlice (int hitIndex) const
     const auto next = std::upper_bound (onsets.begin(), onsets.end(), h.time + 1.0e-6,
                                         [] (double t, const drb::Onset& o) { return t < o.time; });
     return { h.time - 0.002, std::min (h.time + 0.4, next != onsets.end() ? next->time - 0.002 : h.time + 0.4) };
+}
+
+std::pair<double, double> DrumRebuilderProcessor::getSourceSlice (int hitIndex) const
+{
+    const auto& h = analysis.hits[(size_t) hitIndex];
+    const auto [in, out] = getSlice (hitIndex);
+    const double shift = h.sourceTime() - h.time;
+    return { in + shift, out + shift };
+}
+
+// A hit added by hand has no sound of its own at its time: it plays its
+// instrument's loudest hit found by the analysis (-1 = none: the recording at
+// its time).
+double DrumRebuilderProcessor::borrowedSource (drb::Instrument instrument) const
+{
+    const drb::Hit* best = nullptr;
+    for (const auto& h : analysis.hits)
+        if (h.instrument == instrument && ! h.added && (best == nullptr || h.velocity > best->velocity))
+            best = &h;
+    return best != nullptr ? best->sourceTime() : -1.0;
+}
+
+// How loud the borrowed sound is in the recording (as a velocity).
+float DrumRebuilderProcessor::borrowedVelocity (drb::Instrument instrument) const
+{
+    const drb::Hit* best = nullptr;
+    for (const auto& h : analysis.hits)
+        if (h.instrument == instrument && ! h.added && (best == nullptr || h.velocity > best->velocity))
+            best = &h;
+    return best != nullptr ? best->velocity / best->soundGain() : -1.0f;
 }
 
 void DrumRebuilderProcessor::setSlice (int hitIndex, double in, double out)
@@ -602,6 +647,9 @@ void DrumRebuilderProcessor::quantizeHits (double divisionBeats, double strength
     if (analysis.grid.bpm <= 0.0 || analysis.hits.empty())
         return;
     beginHitEdit();
+    for (auto& h : analysis.hits)
+        if (h.source < 0.0)
+            h.source = h.time;   // the sounds stay where they are in the recording
     analysis.hits = drb::quantize (analysis.hits, analysis.grid, divisionBeats, strength);
     rebuildOnsets();
     hitsChanged();
@@ -758,37 +806,28 @@ void DrumRebuilderProcessor::setSolo (drb::Instrument i, bool on)
     sendChangeMessage();
 }
 
+// Only the solo instruments' hits: with their own sounds (A) or the rebuilt
+// beat's sounds (B), at the recording's tempo so the views stay in step.
 void DrumRebuilderProcessor::buildSoloAudio()
 {
     if (loaded == nullptr)
         return;
 
-    // The recording, silent except from each hit of a solo instrument until
-    // the next hit of anything (at most 0.4 s), with short fades.
-    const auto& src = loaded->audio;
-    const double sr = loaded->sampleRate;
-    // How open the gate is at each sample: the most any solo hit opens it.
-    std::vector<float> gain ((size_t) src.getNumSamples(), 0.0f);
-    const int fadeIn = (int) (0.002 * sr), fadeOut = (int) (0.012 * sr);
-    for (size_t k = 0; k < analysis.hits.size(); ++k)
-    {
-        if (! solo[(size_t) analysis.hits[k].instrument])
-            continue;
-        const auto [in, out] = getSlice ((int) k);
-        const int a = std::max (0, (int) (in * sr));
-        const int b = std::min (src.getNumSamples(), (int) (out * sr));
-        for (int i = a; i < b; ++i)
-            gain[(size_t) i] = std::max (gain[(size_t) i],
-                                         std::min ({ 1.0f, (float) (i - a) / (float) fadeIn, (float) (b - i) / (float) fadeOut }));
-    }
+    auto input = makeRebuildInput();
+    drb::RebuildInput only;
+    only.audio = input.audio;
+    only.sampleRate = input.sampleRate;
+    for (size_t i = 0; i < input.hits.size(); ++i)
+        if (solo[(size_t) input.hits[i].instrument])
+        {
+            only.hits.push_back (input.hits[i]);
+            only.slices.push_back (input.slices[i]);
+        }
 
-    juce::AudioBuffer<float> gated (src.getNumChannels(), src.getNumSamples());
-    for (int ch = 0; ch < src.getNumChannels(); ++ch)
-        for (int i = 0; i < src.getNumSamples(); ++i)
-            gated.setSample (ch, i, src.getSample (ch, i) * gain[(size_t) i]);
-
+    auto settings = listenRebuilt ? makeRebuildSettings() : drb::RebuildSettings();
+    settings.tempoFactor = 1.0;
     const double rate = preparedRate > 0.0 ? preparedRate : 44100.0;
-    auditionPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::resample (gated, sr, rate)));
+    auditionPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::renderRebuild (only, settings, rate)));
     auditionPlayer.setLoop (player.isLooping(), region);
 }
 
@@ -837,7 +876,9 @@ int DrumRebuilderProcessor::saveOriginals()
     std::vector<drb::Cut> cuts;
     for (size_t i = 0; i < analysis.hits.size(); ++i)
     {
-        const auto [in, out] = getSlice ((int) i);
+        if (analysis.hits[i].added)
+            continue;   // no sound of its own
+        const auto [in, out] = getSourceSlice ((int) i);
         cuts.push_back ({ analysis.hits[i].instrument, in, out });
     }
     const int written = library.saveOriginals (getBeatName(), loaded->audio, loaded->sampleRate, cuts);
@@ -960,7 +1001,7 @@ drb::RebuildInput DrumRebuilderProcessor::makeRebuildInput() const
     in.sampleRate = loaded != nullptr ? loaded->sampleRate : 44100.0;
     in.hits = analysis.hits;
     for (size_t i = 0; i < analysis.hits.size(); ++i)
-        in.slices.push_back (getSlice ((int) i));
+        in.slices.push_back (getSourceSlice ((int) i));
     return in;
 }
 
@@ -1107,12 +1148,13 @@ juce::ValueTree DrumRebuilderProcessor::makeBeatState() const
 
     if (onsetsEdited)
     {
-        juce::StringArray items;   // time:instrument:velocity:in:out:likeness of kick,snare,hat closed,hat open
+        juce::StringArray items;   // time:instrument:velocity:in:out:likeness of kick,snare,hat closed,hat open:source:added:soundVelocity
         for (const auto& h : analysis.hits)
             items.add (juce::String (h.time, 6) + ":" + juce::String ((int) h.instrument) + ":" + juce::String (h.velocity, 3)
                        + ":" + juce::String (h.sliceIn, 4) + ":" + juce::String (h.sliceOut, 4) + ":"
                        + juce::String (h.likeness[0], 2) + "," + juce::String (h.likeness[1], 2) + ","
-                       + juce::String (h.likeness[2], 2) + "," + juce::String (h.likeness[3], 2));
+                       + juce::String (h.likeness[2], 2) + "," + juce::String (h.likeness[3], 2)
+                       + ":" + juce::String (h.source, 6) + ":" + (h.added ? "1" : "0") + ":" + juce::String (h.soundVelocity, 3));
         beat.setProperty ("hitList", items.joinIntoString (" "), nullptr);
     }
 
@@ -1159,6 +1201,13 @@ void DrumRebuilderProcessor::readBeatState (const juce::ValueTree& beat)
                 for (int i = 0; i < like.size() && i < 4; ++i)
                     h.likeness[(size_t) i] = (float) like[i].getDoubleValue();
             }
+            if (parts.size() >= 8)
+            {
+                h.source = parts[6].getDoubleValue();
+                h.added = parts[7] == "1";
+            }
+            if (parts.size() >= 9)
+                h.soundVelocity = (float) parts[8].getDoubleValue();
             pendingHits.push_back (h);
         }
     }
