@@ -203,6 +203,7 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
             p->redoStack.clear();
             p->auditionPlayer.stop();
             p->auditionPlayer.clearSource();
+            p->solo = {};
             p->checks = {};
             const bool restoring = p->loaded->file == p->pendingFile;
 
@@ -490,6 +491,37 @@ void DrumRebuilderProcessor::setHitVelocity (int hitIndex, float velocity)
     hitsChanged();
 }
 
+std::pair<double, double> DrumRebuilderProcessor::getSlice (int hitIndex) const
+{
+    const auto& h = analysis.hits[(size_t) hitIndex];
+    if (h.sliceOut > h.sliceIn)
+        return { h.time + h.sliceIn, h.time + h.sliceOut };
+
+    const auto& onsets = analysis.onsets;
+    const auto next = std::upper_bound (onsets.begin(), onsets.end(), h.time + 1.0e-6,
+                                        [] (double t, const drb::Onset& o) { return t < o.time; });
+    return { h.time - 0.002, std::min (h.time + 0.4, next != onsets.end() ? next->time - 0.002 : h.time + 0.4) };
+}
+
+void DrumRebuilderProcessor::setSlice (int hitIndex, double in, double out)
+{
+    if (! juce::isPositiveAndBelow (hitIndex, (int) analysis.hits.size()) || out <= in)
+        return;
+    auto& h = analysis.hits[(size_t) hitIndex];
+    h.sliceIn = (float) (in - h.time);
+    h.sliceOut = (float) (out - h.time);
+    h.manual = true;
+    hitsChanged();
+}
+
+int DrumRebuilderProcessor::findHit (double time, drb::Instrument instrument) const
+{
+    for (size_t i = 0; i < analysis.hits.size(); ++i)
+        if (std::abs (analysis.hits[i].time - time) < 1.0e-9 && analysis.hits[i].instrument == instrument)
+            return (int) i;
+    return -1;
+}
+
 void DrumRebuilderProcessor::quantizeHits (double divisionBeats, double strength)
 {
     if (analysis.grid.bpm <= 0.0 || analysis.hits.empty())
@@ -569,6 +601,22 @@ void DrumRebuilderProcessor::hitsChanged()
         analysis.grid.bars = std::max (1, (int) std::ceil ((analysis.onsets.back().time - g.firstDownbeat + 0.05)
                                                            / (g.timeSignature.beatsPerBar * g.beatSeconds())));
     }
+
+    // Solo playing: hear the change, from where it was. Once the edits
+    // pause for a moment, so a drag doesn't rebuild it at every step.
+    if (auditionPlayer.isPlaying())
+    {
+        const int generation = ++soloRebuild;
+        juce::WeakReference<DrumRebuilderProcessor> self (this);
+        juce::Timer::callAfterDelay (150, [self, generation]
+        {
+            if (self == nullptr || generation != self->soloRebuild || ! self->auditionPlayer.isPlaying())
+                return;
+            const double at = self->auditionPlayer.getPositionSeconds();
+            self->buildSoloAudio();
+            self->auditionPlayer.setPositionSeconds (at);
+        });
+    }
     sendChangeMessage();
 }
 
@@ -576,61 +624,116 @@ void DrumRebuilderProcessor::setRegion (juce::Range<double> r)
 {
     region = r;
     player.setLoop (player.isLooping(), region);
+    auditionPlayer.setLoop (player.isLooping(), region);
     sendChangeMessage();
 }
 
 void DrumRebuilderProcessor::setLooping (bool on)
 {
     player.setLoop (on, region);
+    auditionPlayer.setLoop (on, region);
     sendChangeMessage();
 }
 
-void DrumRebuilderProcessor::auditionInstrument (drb::Instrument instrument)
+bool DrumRebuilderProcessor::anySolo() const
+{
+    return std::any_of (solo.begin(), solo.end(), [] (bool b) { return b; });
+}
+
+std::optional<drb::Instrument> DrumRebuilderProcessor::firstSolo() const
+{
+    for (auto i : drb::allInstruments)
+        if (solo[(size_t) i])
+            return i;
+    return std::nullopt;
+}
+
+std::vector<drb::Instrument> DrumRebuilderProcessor::getSolo() const
+{
+    std::vector<drb::Instrument> out;
+    for (auto i : drb::allInstruments)
+        if (solo[(size_t) i])
+            out.push_back (i);
+    return out;
+}
+
+void DrumRebuilderProcessor::setSolo (drb::Instrument i, bool on)
+{
+    solo[(size_t) i] = on;
+    if (auditionPlayer.isPlaying())
+    {
+        if (anySolo())
+        {
+            const double at = auditionPlayer.getPositionSeconds();
+            buildSoloAudio();
+            auditionPlayer.setPositionSeconds (at);
+        }
+        else
+        {
+            // Nothing solo any more: carry on with the whole beat.
+            const double at = auditionPlayer.getPositionSeconds();
+            auditionPlayer.stop();
+            player.setPositionSeconds (at);
+            player.play();
+        }
+    }
+    sendChangeMessage();
+}
+
+void DrumRebuilderProcessor::buildSoloAudio()
 {
     if (loaded == nullptr)
         return;
 
-    // The recording, silent except from each hit of this instrument until
+    // The recording, silent except from each hit of a solo instrument until
     // the next hit of anything (at most 0.4 s), with short fades.
     const auto& src = loaded->audio;
     const double sr = loaded->sampleRate;
-    juce::AudioBuffer<float> gated (src.getNumChannels(), src.getNumSamples());
-    gated.clear();
-
-    const auto& onsets = analysis.onsets;
+    // How open the gate is at each sample: the most any solo hit opens it.
+    std::vector<float> gain ((size_t) src.getNumSamples(), 0.0f);
     const int fadeIn = (int) (0.002 * sr), fadeOut = (int) (0.012 * sr);
-    for (const auto& h : analysis.hits)
+    for (size_t k = 0; k < analysis.hits.size(); ++k)
     {
-        if (h.instrument != instrument)
+        if (! solo[(size_t) analysis.hits[k].instrument])
             continue;
-        const auto next = std::upper_bound (onsets.begin(), onsets.end(), h.time + 1.0e-6,
-                                            [] (double t, const drb::Onset& o) { return t < o.time; });
-        const double end = std::min (h.time + 0.4, next != onsets.end() ? next->time - 0.002 : h.time + 0.4);
-        const int a = std::max (0, (int) ((h.time - 0.002) * sr));
-        const int b = std::min (src.getNumSamples(), (int) (end * sr));
+        const auto [in, out] = getSlice ((int) k);
+        const int a = std::max (0, (int) (in * sr));
+        const int b = std::min (src.getNumSamples(), (int) (out * sr));
         for (int i = a; i < b; ++i)
-        {
-            const float g = std::min ({ 1.0f, (float) (i - a) / (float) fadeIn, (float) (b - i) / (float) fadeOut });
-            for (int ch = 0; ch < src.getNumChannels(); ++ch)
-                gated.setSample (ch, i, src.getSample (ch, i) * g);
-        }
+            gain[(size_t) i] = std::max (gain[(size_t) i],
+                                         std::min ({ 1.0f, (float) (i - a) / (float) fadeIn, (float) (b - i) / (float) fadeOut }));
     }
 
+    juce::AudioBuffer<float> gated (src.getNumChannels(), src.getNumSamples());
+    for (int ch = 0; ch < src.getNumChannels(); ++ch)
+        for (int i = 0; i < src.getNumSamples(); ++i)
+            gated.setSample (ch, i, src.getSample (ch, i) * gain[(size_t) i]);
+
+    const double rate = preparedRate > 0.0 ? preparedRate : 44100.0;
+    auditionPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::resample (gated, sr, rate)));
+    auditionPlayer.setLoop (player.isLooping(), region);
+}
+
+void DrumRebuilderProcessor::playSolo()
+{
+    if (loaded == nullptr || ! anySolo())
+        return;
+    const double at = player.getPositionSeconds();
     player.pause();
     previewPlayer.stop();
-    auditionInstrument_ = instrument;
-    const double rate = preparedRate > 0.0 ? preparedRate : 44100.0;
-    auditionPlayer.stop();
-    auditionPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::resample (gated, sr, rate)));
-    auditionPlayer.setLoop (true, {});
-    auditionPlayer.setPositionSeconds (std::max (0.0, (onsets.empty() ? 0.0 : onsets.front().time) - 0.05));
+    buildSoloAudio();
+    auditionPlayer.setPositionSeconds (at);
     auditionPlayer.play();
     sendChangeMessage();
 }
 
-void DrumRebuilderProcessor::stopAudition()
+void DrumRebuilderProcessor::pauseSolo()
 {
-    auditionPlayer.stop();
+    if (! auditionPlayer.isPlaying())
+        return;
+    const double at = auditionPlayer.getPositionSeconds();
+    auditionPlayer.pause();
+    player.setPositionSeconds (at);
     sendChangeMessage();
 }
 
@@ -670,9 +773,12 @@ void DrumRebuilderProcessor::getStateInformation (juce::MemoryBlock& dest)
     }
     if (loaded != nullptr && onsetsEdited)
     {
-        juce::StringArray items;   // time:instrument:velocity
+        juce::StringArray items;   // time:instrument:velocity:in:out:likeness of kick,snare,hat closed,hat open
         for (const auto& h : analysis.hits)
-            items.add (juce::String (h.time, 6) + ":" + juce::String ((int) h.instrument) + ":" + juce::String (h.velocity, 3));
+            items.add (juce::String (h.time, 6) + ":" + juce::String ((int) h.instrument) + ":" + juce::String (h.velocity, 3)
+                       + ":" + juce::String (h.sliceIn, 4) + ":" + juce::String (h.sliceOut, 4) + ":"
+                       + juce::String (h.likeness[0], 2) + "," + juce::String (h.likeness[1], 2) + ","
+                       + juce::String (h.likeness[2], 2) + "," + juce::String (h.likeness[3], 2));
         state.setProperty ("hitList", items.joinIntoString (" "), nullptr);
     }
     if (loaded != nullptr)
@@ -709,9 +815,19 @@ void DrumRebuilderProcessor::setStateInformation (const void* data, int size)
         {
             const auto parts = juce::StringArray::fromTokens (item, ":", "");
             const int instrument = parts[1].getIntValue();
-            if (parts.size() == 3 && juce::isPositiveAndBelow (instrument, drb::numInstruments))
-                pendingHits.push_back ({ parts[0].getDoubleValue(), (drb::Instrument) instrument,
-                                         (float) parts[2].getDoubleValue(), 1.0f, true });
+            if (parts.size() >= 3 && juce::isPositiveAndBelow (instrument, drb::numInstruments))
+            {
+                drb::Hit h { parts[0].getDoubleValue(), (drb::Instrument) instrument, (float) parts[2].getDoubleValue(), 1.0f, true };
+                if (parts.size() >= 6)
+                {
+                    h.sliceIn = (float) parts[3].getDoubleValue();
+                    h.sliceOut = (float) parts[4].getDoubleValue();
+                    const auto like = juce::StringArray::fromTokens (parts[5], ",", "");
+                    for (int i = 0; i < like.size() && i < 4; ++i)
+                        h.likeness[(size_t) i] = (float) like[i].getDoubleValue();
+                }
+                pendingHits.push_back (h);
+            }
         }
         juce::WeakReference<DrumRebuilderProcessor> self (this);
         juce::MessageManager::callAsync ([self, file]

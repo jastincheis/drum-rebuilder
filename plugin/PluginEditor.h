@@ -5,6 +5,7 @@
 
 class ImportPage;
 class AnalysisPage;
+class InstrumentsPage;
 class MidiEditorPage;
 class ExportPage;
 
@@ -20,6 +21,7 @@ public:
     void paint (juce::Graphics&) override;
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
+    void mouseDown (const juce::MouseEvent&) override;
 
     bool isInterestedInFileDrag (const juce::StringArray&) override;
     void filesDropped (const juce::StringArray&, int, int) override;
@@ -41,12 +43,12 @@ private:
     juce::TabbedComponent tabs { juce::TabbedButtonBar::TabsAtTop };
     ImportPage* importPage = nullptr;       // owned by tabs
     AnalysisPage* analysisPage = nullptr;   // owned by tabs
+    InstrumentsPage* instrumentsPage = nullptr;   // owned by tabs
     MidiEditorPage* midiPage = nullptr;     // owned by tabs
     ExportPage* exportPage = nullptr;       // owned by tabs
 
     std::unique_ptr<juce::FileChooser> chooser;
     int shownId = -1;
-    bool focusTaken = false;
 
     void togglePlay();
     void updateHeader();

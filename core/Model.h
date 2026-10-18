@@ -43,6 +43,10 @@ struct Hit
     float confidence = 1.0f;     // 0..1, how sure the analysis is
     bool manual = false;         // placed or corrected by hand
 
+    // Where this instrument's sound starts and ends (IN / OUT), in seconds
+    // from `time`, when set by hand; sliceOut <= sliceIn = automatic.
+    float sliceIn = 0.0f, sliceOut = 0.0f;
+
     // How much the sound at this time fits each instrument, 0..1, from the
     // analysis (all 0 when unknown). Used to suggest what else it could be.
     std::array<float, numInstruments> likeness {};

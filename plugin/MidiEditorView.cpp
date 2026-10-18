@@ -1,4 +1,5 @@
 #include "MidiEditorView.h"
+#include "Focus.h"
 #include "Theme.h"
 
 #include <cmath>
@@ -369,7 +370,7 @@ void MidiEditorView::showHitMenu (int hit)
             selected = -1;
         }
     });
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 
 bool MidiEditorView::keyPressed (const juce::KeyPress& key)

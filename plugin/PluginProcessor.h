@@ -81,6 +81,13 @@ public:
     void deleteHitAt (int hitIndex);
     int addHitAt (double seconds, drb::Instrument, float velocity);  // returns its index
     void setHitVelocity (int hitIndex, float velocity);
+
+    // IN / OUT of one instrument hit: where its sound starts and ends.
+    // Automatic until set: from the hit to the next hit of anything (at most
+    // 0.4 s). Drags call beginHitEdit() first.
+    std::pair<double, double> getSlice (int hitIndex) const;
+    void setSlice (int hitIndex, double in, double out);
+    int findHit (double time, drb::Instrument) const;   // -1 = none
     void quantizeHits (double divisionBeats, double strength);
 
     // Undo / redo for every change to the hits. A drag is one step: call
@@ -111,14 +118,20 @@ public:
     const juce::File& getPreviewFile() const { return previewTarget; }
     const juce::String& getPreviewError() const { return previewError; }
 
-    // Checking the instruments: hear only the hits of one instrument, cut
-    // from the recording at their own times (looping), then say whether
-    // that really is the instrument. 0 = not checked yet, 1 = OK, 2 = wrong.
-    void auditionInstrument (drb::Instrument);
-    void stopAudition();
-    bool isAuditioning() const { return auditionPlayer.isPlaying(); }
-    drb::Instrument getAuditionInstrument() const { return auditionInstrument_; }
+    // Solo on the Instruments tab: play only the hits of the solo
+    // instruments, cut from the recording at their own times. It plays from
+    // the main playhead, and when it stops the playhead stays there.
+    void setSolo (drb::Instrument, bool on);
+    bool isSolo (drb::Instrument i) const { return solo[(size_t) i]; }
+    bool anySolo() const;
+    std::optional<drb::Instrument> firstSolo() const;
+    std::vector<drb::Instrument> getSolo() const;
+    void playSolo();
+    void pauseSolo();
+    bool isSoloPlaying() const { return auditionPlayer.isPlaying(); }
     drb::Player& getAuditionPlayer() { return auditionPlayer; }
+
+    // Instrument checks (0 = not yet, 1 = OK, 2 = wrong), kept with the state.
     int getCheck (drb::Instrument i) const { return checks[(size_t) i]; }
     void setCheck (drb::Instrument, int);
 
@@ -128,7 +141,8 @@ public:
 
 private:
     drb::Player player, previewPlayer, auditionPlayer;
-    drb::Instrument auditionInstrument_ = drb::Instrument::Kick;
+    std::array<bool, drb::numInstruments> solo {};
+    int soloRebuild = 0;
     std::array<int, drb::numInstruments> checks {};
     std::array<int, drb::numInstruments> pendingChecks {};
     drb::Metronome metronome;
@@ -162,6 +176,7 @@ private:
     void rebuildOnsets(); // one onset per distinct hit time
 
     void installPlayback();
+    void buildSoloAudio();   // the solo instruments' hits, at the device rate
     void updateMetronomeGrid();
     void placeDownbeat (double seconds);
 

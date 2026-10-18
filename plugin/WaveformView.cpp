@@ -1,4 +1,5 @@
 #include "WaveformView.h"
+#include "Focus.h"
 #include "Theme.h"
 
 #include <algorithm>
@@ -133,22 +134,44 @@ void WaveformView::jumpToHit (int direction)
 {
     const auto& onsets = processor.getAnalysis().onsets;
     auto& player = processor.getPlayer();
-    const double pos = player.getPositionSeconds();
+    auto& solo = processor.getAuditionPlayer();
+    const bool soloPlaying = processor.isSoloPlaying();
+    const double pos = soloPlaying ? solo.getPositionSeconds() : player.getPositionSeconds();
+
+    // On the Instruments tab with instruments on solo: only their hits.
+    const bool onlySolo = instrumentMode && ! focus.empty();
+    const auto wanted = [&] (size_t i)
+    {
+        if (! onlySolo)
+            return true;
+        const auto present = processor.getInstrumentsAt ((int) i);
+        return std::any_of (present.begin(), present.end(), [this] (drb::Instrument inst) { return focused (inst); });
+    };
 
     // A little slack, so pressing again while playing goes on to the next hit.
-    double target = direction > 0 ? duration : 0.0;
-    for (const auto& o : onsets)
+    std::optional<double> target;
+    for (size_t i = 0; i < onsets.size(); ++i)
     {
-        if (direction > 0 && o.time > pos + 0.005)
+        const double t = onsets[i].time;
+        if (direction > 0 && t > pos + 0.005 && wanted (i))
         {
-            target = o.time;
+            target = t;
             break;
         }
-        if (direction < 0 && o.time < pos - 0.005)
-            target = o.time;
+        if (direction < 0 && t < pos - 0.005 && wanted (i))
+            target = t;
     }
-    player.setPositionSeconds (target);
-    scrollToShow (target);
+    if (! target)
+    {
+        if (onlySolo)
+            return;   // no more of them that way: stay
+        target = direction > 0 ? duration : 0.0;
+    }
+
+    player.setPositionSeconds (*target);
+    if (soloPlaying)
+        solo.setPositionSeconds (*target);
+    scrollToShow (*target);
     repaint();
 }
 
@@ -207,10 +230,38 @@ void WaveformView::paint (juce::Graphics& g)
         }
     }
 
+    // Colour: on the Instruments tab each instrument hit colours the
+    // waveform between its IN and OUT; two instruments at once = top half
+    // one, bottom half the other. With instruments on solo only theirs keep
+    // a colour.
+    struct Slice { double in, out; juce::Colour colour; int row; };
+    std::vector<Slice> slices;
+    const bool tint = instrumentMode;
+    if (tint)
+    {
+        const auto& onsetList = analysis.onsets;
+        for (size_t i = 0; i < onsetList.size(); ++i)
+        {
+            auto present = processor.getInstrumentsAt ((int) i);
+            std::sort (present.begin(), present.end());
+            for (size_t k = 0; k < present.size(); ++k)
+            {
+                if (! focus.empty() && ! focused (present[k]))
+                    continue;
+                const int hit = processor.findHit (onsetList[i].time, present[k]);
+                if (hit < 0)
+                    continue;
+                const auto [in, out] = processor.getSlice (hit);
+                if (out >= viewStart && in <= viewEnd)
+                    slices.push_back ({ in, out, theme::instrument (present[k]), (int) k });
+            }
+        }
+    }
+    const auto plain = tint ? theme::wave.withAlpha (focus.empty() ? 0.35f : 0.22f) : theme::wave;
+
     // The waveform, one min/max line per pixel.
     const double secondsPerPx = (viewEnd - viewStart) / std::max (1, area.getWidth());
     const float mid = (float) area.getCentreY(), halfH = area.getHeight() * 0.48f;
-    g.setColour (theme::wave);
     for (int x = 0; x < area.getWidth(); ++x)
     {
         const double t0 = viewStart + x * secondsPerPx, t1 = t0 + secondsPerPx;
@@ -224,7 +275,33 @@ void WaveformView::paint (juce::Graphics& g)
             lo = std::min (lo, peaks[(size_t) b].first);
             hi = std::max (hi, peaks[(size_t) b].second);
         }
-        g.drawVerticalLine (area.getX() + x, mid - hi * halfH, mid - lo * halfH + 1.0f);
+
+        auto top = plain, bottom = plain;
+        if (tint)
+        {
+            // The latest-starting slice on each row wins.
+            const Slice* rowTop = nullptr;
+            const Slice* rowBottom = nullptr;
+            for (const auto& sl : slices)
+                if (sl.in < t1 && sl.out > t0)
+                {
+                    auto*& slot = sl.row == 0 ? rowTop : rowBottom;
+                    if (slot == nullptr || sl.in > slot->in)
+                        slot = &sl;
+                }
+            if (rowTop == nullptr)
+                std::swap (rowTop, rowBottom);
+            if (rowTop != nullptr)
+            {
+                top = rowTop->colour;
+                bottom = rowBottom != nullptr ? rowBottom->colour : rowTop->colour;
+            }
+        }
+        const float yTop = mid - hi * halfH, yBottom = mid - lo * halfH + 1.0f;
+        g.setColour (top);
+        g.drawVerticalLine (area.getX() + x, yTop, mid + 0.5f);
+        g.setColour (bottom);
+        g.drawVerticalLine (area.getX() + x, mid + 0.5f, yBottom);
     }
 
     // Hits: a thin line in the colour of the (first) instrument, a marker
@@ -252,20 +329,32 @@ void WaveformView::paint (juce::Graphics& g)
 
         const float x = secondsToX (o.time);
         const bool grabbed = grab == Grab::hit && (int) i == grabbedHit;
-        const bool faded = focus.has_value()
-                        && std::none_of (here.begin(), here.end(), [this] (auto* hit) { return hit->instrument == *focus; });
-        const float a = grabbed ? 1.0f : faded ? 0.18f : 0.45f + 0.55f * (strongest > 0.0f ? o.strength / strongest : 1.0f);
+        // Checking an instrument: its hits stand out (thicker, its colour,
+        // its name first), every other hit fades.
+        const bool isFocus = std::any_of (here.begin(), here.end(), [this] (auto* hit) { return focused (hit->instrument); });
+        const bool faded = ! focus.empty() && ! isFocus;
+        if (isFocus)
+            std::stable_partition (here.begin(), here.end(), [this] (auto* hit) { return focused (hit->instrument); });
+
+        const float a = grabbed ? 1.0f : faded ? 0.12f : isFocus ? 1.0f : 0.45f + 0.55f * (strongest > 0.0f ? o.strength / strongest : 1.0f);
         const auto colour = here.empty() ? theme::onset : theme::instrument (here.front()->instrument);
 
-        g.setColour (colour.withAlpha (a * 0.4f));
-        g.drawVerticalLine ((int) x, (float) area.getY(), (float) area.getBottom());
+        g.setColour (colour.withAlpha (isFocus ? 0.85f : a * 0.4f));
+        if (isFocus)
+            g.fillRect (juce::Rectangle<float> (x - 1.0f, (float) area.getY(), 2.0f, (float) area.getHeight()));
+        else
+            g.drawVerticalLine ((int) x, (float) area.getY(), (float) area.getBottom());
         g.setColour (grabbed ? juce::Colours::white : colour.withAlpha (a));
         juce::Path tri;
         const float y = (float) area.getBottom() + 1.0f;
-        tri.addTriangle (x, y, x - 4.0f, y + 7.0f, x + 4.0f, y + 7.0f);
+        const float half = isFocus ? 6.0f : 4.0f;
+        tri.addTriangle (x, y, x - half, y + 7.0f, x + half, y + 7.0f);
         g.fillPath (tri);
 
         // Names: full when the neighbours leave room, one letter when not.
+        // (On the Instruments tab they are on the waveform, see below.)
+        if (instrumentMode)
+            continue;
         const float before = i > 0 ? x - secondsToX (onsets[i - 1].time) : 1000.0f;
         const float after = i + 1 < onsets.size() ? secondsToX (onsets[i + 1].time) - x : 1000.0f;
         const float room = std::min (before, after);
@@ -280,9 +369,66 @@ void WaveformView::paint (juce::Graphics& g)
                 name << "+";
             if (here[k]->confidence < 0.5f && ! here[k]->manual)
                 name << "?";
-            g.setColour (theme::instrument (here[k]->instrument).withAlpha (grabbed ? 1.0f : faded ? 0.3f : 0.95f));
+            const bool dim = faded || (isFocus && ! focused (here[k]->instrument));
+            g.setColour (theme::instrument (here[k]->instrument).withAlpha (grabbed ? 1.0f : dim ? 0.22f : 0.95f));
             g.drawText (name, juce::Rectangle<float> (x - 30.0f, y + 8.0f + 12.0f * (float) k, 60.0f, 12.0f),
                         juce::Justification::centred, false);
+        }
+    }
+
+    // Instruments tab: for each instrument of each hit a bar from its IN to
+    // its OUT, its name at the start; rows one under the other. Click the
+    // name: what it really is. Drag the bar's ends: IN and OUT.
+    pills.clear();
+    if (instrumentMode)
+    {
+        for (size_t i = 0; i < onsets.size(); ++i)
+        {
+            const double t = onsets[i].time;
+            if (t < viewStart - 1.0 || t > viewEnd)
+                continue;
+            auto present = processor.getInstrumentsAt ((int) i);
+            std::sort (present.begin(), present.end());
+            const float x = secondsToX (t);
+            const float room = i + 1 < onsets.size() ? secondsToX (onsets[i + 1].time) - x : 1000.0f;
+            if (room < 13.0f)
+                continue;
+
+            for (size_t k = 0; k < present.size(); ++k)
+            {
+                const auto inst = present[k];
+                const int hit = processor.findHit (t, inst);
+                if (hit < 0)
+                    continue;
+                const auto [in, out] = processor.getSlice (hit);
+                const float y = (float) area.getY() + 6.0f + 23.0f * (float) k;
+                const juce::Rectangle<float> bar (secondsToX (in), y, std::max (4.0f, secondsToX (out) - secondsToX (in)), 20.0f);
+                const bool dim = ! focus.empty() && ! focused (inst);
+                const auto colour = theme::instrument (inst);
+
+                g.setColour (colour.withAlpha (dim ? 0.06f : 0.22f));
+                g.fillRoundedRectangle (bar, 4.0f);
+                g.setColour (colour.withAlpha (dim ? 0.2f : 0.8f));
+                g.drawRoundedRectangle (bar.reduced (0.5f), 4.0f, 1.0f);
+                // The OUT grip.
+                g.fillRect (juce::Rectangle<float> (bar.getRight() - 3.0f, bar.getY() + 4.0f, 2.0f, bar.getHeight() - 8.0f));
+
+                juce::String name = drb::instrumentName (inst);
+                g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
+                float w = (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), name) + 12.0f;
+                const float space = std::max (room, bar.getRight() - x) - 8.0f;
+                if (w > space)
+                {
+                    name = theme::shortName (inst, true);
+                    w = 15.0f;
+                }
+                const juce::Rectangle<float> label (x + 2.0f, y + 1.0f, w, 18.0f);
+                g.setColour (colour.withAlpha (dim ? 0.25f : 0.95f));
+                g.fillRoundedRectangle (label, 4.0f);
+                g.setColour (juce::Colours::black.withAlpha (dim ? 0.5f : 0.85f));
+                g.drawText (name, label, juce::Justification::centred, false);
+                pills.push_back ({ label.toNearestInt(), bar.toNearestInt(), (int) i, hit, inst });
+            }
         }
     }
 
@@ -316,17 +462,68 @@ void WaveformView::paint (juce::Graphics& g)
     }
 
     // Playhead (the checked instrument's, while listening to it).
-    const bool auditioning = processor.isAuditioning();
+    const bool auditioning = processor.isSoloPlaying();
     const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayer().getPositionSeconds();
     if (pos >= viewStart && pos <= viewEnd)
     {
-        g.setColour (auditioning ? theme::instrument (processor.getAuditionInstrument()) : theme::accent);
+        const auto solo = processor.firstSolo();
+        g.setColour (auditioning && solo ? theme::instrument (*solo) : theme::accent);
         g.fillRect (juce::Rectangle<float> (secondsToX (pos) - 0.75f, 0.0f, 1.5f, (float) area.getBottom()));
     }
 }
 
+// What is under the mouse on the Instruments tab: a bar's OUT or IN end,
+// its name, or nothing. An OUT wins over the IN of the next bar it touches
+// (by default each bar ends where the next hit starts); later bars (drawn on
+// top) win otherwise.
+WaveformView::PillPart WaveformView::findPill (juce::Point<int> p, const Pill*& found) const
+{
+    const auto onRow = [p] (const Pill& pill) { return p.y >= pill.bar.getY() && p.y < pill.bar.getBottom(); };
+
+    for (auto it = pills.rbegin(); it != pills.rend(); ++it)
+        if (onRow (*it) && std::abs (p.x - it->bar.getRight()) <= 5)
+        {
+            found = &*it;
+            return PillPart::out;
+        }
+    for (auto it = pills.rbegin(); it != pills.rend(); ++it)
+        if (onRow (*it) && p.x >= it->bar.getX() - 3 && p.x <= it->bar.getX() + 1)
+        {
+            found = &*it;
+            return PillPart::in;
+        }
+    for (auto it = pills.rbegin(); it != pills.rend(); ++it)
+        if (onRow (*it) && (it->label.contains (p) || it->bar.contains (p)))
+        {
+            found = &*it;
+            return PillPart::label;
+        }
+    found = nullptr;
+    return PillPart::none;
+}
+
 void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
+    pillPressed = false;
+    slicePart = PillPart::none;
+    if (const Pill* pill = nullptr; instrumentMode)
+    {
+        const auto part = findPill (e.getPosition(), pill);
+        if (part != PillPart::none)
+        {
+            grab = Grab::none;
+            dragging = false;
+            sliceHit = pill->hit;
+            pillHit = pill->onset;
+            pillInstrument = pill->instrument;
+            if (part == PillPart::label)
+                pillPressed = true;
+            else
+                slicePart = part;
+            return;
+        }
+    }
+
     if (e.mods.isPopupMenu())
     {
         showMenu (e);
@@ -394,6 +591,16 @@ double WaveformView::snapToHit (double seconds, int ignoreIndex) const
 
 void WaveformView::mouseMove (const juce::MouseEvent& e)
 {
+    if (const Pill* pill = nullptr; instrumentMode)
+    {
+        const auto part = findPill (e.getPosition(), pill);
+        if (part != PillPart::none)
+        {
+            setMouseCursor (part == PillPart::label ? juce::MouseCursor::PointingHandCursor
+                                                    : juce::MouseCursor::LeftRightResizeCursor);
+            return;
+        }
+    }
     int hit = -1;
     setMouseCursor (processor.getLoaded() != nullptr && findGrab (e.getPosition(), hit) != Grab::none
                         ? juce::MouseCursor::LeftRightResizeCursor
@@ -402,6 +609,23 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
 
 void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
+    if (pillPressed)
+        return;
+    if (slicePart != PillPart::none)
+    {
+        // Drag IN or OUT; the other end stays.
+        if (! dragging)
+            processor.beginHitEdit();
+        dragging = true;
+        const auto [in, out] = processor.getSlice (sliceHit);
+        const double t = juce::jlimit (0.0, duration, xToSeconds ((float) e.x));
+        if (slicePart == PillPart::in)
+            processor.setSlice (sliceHit, std::min (t, out - 0.005), out);
+        else
+            processor.setSlice (sliceHit, in, std::max (t, in + 0.005));
+        repaint();
+        return;
+    }
     if (e.mods.isPopupMenu() || processor.getLoaded() == nullptr || (! dragging && e.getDistanceFromDragStart() < 4))
         return;
 
@@ -429,6 +653,18 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformView::mouseUp (const juce::MouseEvent& e)
 {
+    if (pillPressed)
+    {
+        pillPressed = false;
+        showPillMenu (pillHit, pillInstrument);
+        return;
+    }
+    if (slicePart != PillPart::none)
+    {
+        slicePart = PillPart::none;
+        dragging = false;
+        return;
+    }
     if (e.mods.isPopupMenu() || processor.getLoaded() == nullptr)
         return;
 
@@ -530,7 +766,54 @@ void WaveformView::showMenu (const juce::MouseEvent& e)
                     processor.setFirstDownbeat (t);
             });
     }
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
+}
+
+// A click on an instrument's label: what it really is (the likeliest first),
+// or that it isn't there at all.
+void WaveformView::showPillMenu (int index, drb::Instrument from)
+{
+    juce::WeakReference<juce::Component> self (this);
+    const auto present = processor.getInstrumentsAt (index);
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("This " + juce::String (drb::instrumentName (from)) + " is really:");
+
+    const auto suggested = processor.suggestInstead (index, from);
+    if (suggested)
+    {
+        menu.addItem (juce::String (drb::instrumentName (*suggested)) + "   (suggested)", [this, self, index, from, to = *suggested]
+        {
+            if (self != nullptr)
+                processor.replaceInstrument (index, from, to);
+        });
+        menu.addSeparator();
+    }
+    for (auto to : drb::allInstruments)
+        if (to != from && to != suggested)
+            menu.addItem (drb::instrumentName (to), [this, self, index, from, to]
+            {
+                if (self != nullptr)
+                    processor.replaceInstrument (index, from, to);
+            });
+
+    menu.addSeparator();
+    juce::PopupMenu also;
+    for (auto inst : drb::allInstruments)
+        if (std::find (present.begin(), present.end(), inst) == present.end())
+            also.addItem (drb::instrumentName (inst), [this, self, index, inst]
+            {
+                if (self != nullptr)
+                    processor.toggleInstrument (index, inst);
+            });
+    menu.addSubMenu ("Another instrument here too", also);
+    menu.addItem (present.size() > 1 ? "Not a " + juce::String (drb::instrumentName (from)) + " (remove it)"
+                                     : juce::String ("Not a hit at all (delete it)"),
+                  [this, self, index, from]
+                  {
+                      if (self != nullptr)
+                          processor.toggleInstrument (index, from);
+                  });
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 
 // "This is the Snare. It is really: ..." for a click on a hit's marker:
@@ -565,13 +848,18 @@ void WaveformView::showRenameMenu (int index)
         return m;
     };
 
-    // Several instruments here: the one being checked, or ask which.
+    // Several instruments here: the solo one, or ask which.
     auto from = present.front();
-    if (focus && std::find (present.begin(), present.end(), *focus) != present.end())
-        from = *focus;
+    int soloHere = 0;
+    for (auto inst : present)
+        if (focused (inst))
+        {
+            from = inst;
+            ++soloHere;
+        }
 
     juce::PopupMenu menu;
-    if (present.size() == 1 || focus)
+    if (present.size() == 1 || soloHere == 1)
     {
         menu.addSectionHeader ("This is the " + juce::String (drb::instrumentName (from)) + ". It is really:");
         const auto m = choicesFor (from);
@@ -590,11 +878,13 @@ void WaveformView::showRenameMenu (int index)
         if (self != nullptr)
             processor.deleteHit (index);
     });
-    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition());
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 
 void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
 {
+    if (const Pill* pill = nullptr; instrumentMode && findPill (e.getPosition(), pill) != PillPart::none)
+        return;
     if (e.mods.isPopupMenu() || processor.getLoaded() == nullptr)
         return;
 
@@ -650,7 +940,7 @@ void WaveformView::scrollBarMoved (juce::ScrollBar*, double newStart)
 
 void WaveformView::timerCallback()
 {
-    const bool auditioning = processor.isAuditioning();
+    const bool auditioning = processor.isSoloPlaying();
     const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayer().getPositionSeconds();
     if (std::abs (pos - lastPlayhead) < 1.0e-4)
         return;

@@ -4,6 +4,7 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <algorithm>
 #include <optional>
 
 // The recording with its bar and beat grid, the detected hits, the selected
@@ -29,8 +30,12 @@ public:
     double zoomCentre() const;
     void scrollToShow (double seconds);   // keeps the zoom
 
-    // While checking an instrument: its markers stand out, the others fade.
-    void setFocus (std::optional<drb::Instrument> i) { focus = i; repaint(); }
+    // The Instruments tab: every hit's instruments written on the waveform
+    // in their colours; a click on one says what it really is.
+    void setInstrumentMode (bool on) { instrumentMode = on; }
+
+    // Solo instruments: their hits stand out, the others fade.
+    void setFocus (std::vector<drb::Instrument> instruments) { focus = std::move (instruments); repaint(); }
 
     // Moves the playhead to the previous / next hit (direction -1 / +1).
     void jumpToHit (int direction);   // the playhead if it is in view, else the centre
@@ -67,7 +72,21 @@ private:
     Grab findGrab (juce::Point<int>, int& hitIndex) const;
     double snapToHit (double seconds, int ignoreIndex) const;
     double lastPlayhead = -1.0;
-    std::optional<drb::Instrument> focus;
+    std::vector<drb::Instrument> focus;   // empty = none
+    bool focused (drb::Instrument i) const { return std::find (focus.begin(), focus.end(), i) != focus.end(); }
+    bool instrumentMode = false;
+
+    // The instrument bars drawn on the waveform (name + IN..OUT), for clicks.
+    struct Pill { juce::Rectangle<int> label, bar; int onset, hit; drb::Instrument instrument; };
+    std::vector<Pill> pills;
+    enum class PillPart { none, label, in, out };
+    PillPart findPill (juce::Point<int>, const Pill*& found) const;
+    bool pillPressed = false;
+    PillPart slicePart = PillPart::none;
+    int sliceHit = -1, pillHit = -1;
+    drb::Instrument pillInstrument = drb::Instrument::Kick;
+    void showPillMenu (int hitIndex, drb::Instrument);
+
 
     juce::Rectangle<int> waveArea() const;
     double xToSeconds (float x) const;
