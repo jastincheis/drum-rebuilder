@@ -72,6 +72,9 @@ public:
     void toggleInstrument (int index, drb::Instrument);   // the last one off = the hit is deleted
     void deleteHit (int index);
     void replaceInstrument (int index, drb::Instrument from, drb::Instrument to);
+    // Several at once (a selection of (onset time, instrument)), one undo step.
+    void replaceInstruments (const std::vector<std::pair<double, drb::Instrument>>&, drb::Instrument to);
+    void removeInstruments (const std::vector<std::pair<double, drb::Instrument>>&);
     // What else the sound at this hit could be: the instrument other than
     // `current` it sounds most like, if the analysis has an idea.
     std::optional<drb::Instrument> suggestInstead (int index, drb::Instrument current) const;
@@ -87,6 +90,9 @@ public:
     // for the MIDI editor.
     int moveHitTo (int hitIndex, double seconds, drb::Instrument);   // returns its new index
     void deleteHitAt (int hitIndex);
+    void deleteHitsAt (std::vector<int> hitIndices);   // one undo step
+    // Several hits' loudness at once: (hit index, velocity).
+    void setHitVelocities (const std::vector<std::pair<int, float>>&, bool undoStep = true);
     int addHitAt (double seconds, drb::Instrument, float velocity);  // returns its index
     void setHitVelocity (int hitIndex, float velocity, bool undoStep = true);
     // The hits' changes made by hand (loudness, hits added, moved) are heard
@@ -193,6 +199,13 @@ public:
 
     bool getKeepPitch() const { return keepPitch; }
     void setKeepPitch (bool);
+    // How long an instrument's sound plays from each hit, at most (seconds,
+    // 0 = all of it). Saved with the beat.
+    double getSoundLength (drb::Instrument i) const { return soundLengths[(size_t) i]; }
+    void setSoundLength (drb::Instrument, double seconds);
+    // The sound a Drum Rack row plays now: its chosen sound, or (originals)
+    // its loudest hit cut from the recording. Null = none.
+    drb::SamplePtr getRowSound (drb::Instrument) const;
     double getRebuildBpm() const;   // the rebuilt beat's tempo
     void setRebuildBpm (double);
     double getTempoFactor() const { return tempoFactor; }
@@ -224,6 +237,7 @@ private:
 
     drb::SampleLibrary library { drb::SampleLibrary::defaultRoot() };
     std::array<drb::PickMode, drb::numInstruments> pickModes {};
+    std::array<double, drb::numInstruments> soundLengths {};
     std::array<juce::File, drb::numInstruments> fixedFiles;
     std::array<bool, drb::numInstruments> changing = [] { std::array<bool, drb::numInstruments> a; a.fill (true); return a; }();
     struct SoundSet
@@ -305,6 +319,7 @@ private:
     std::vector<std::vector<drb::Hit>> undoStack, redoStack;
 
     void hitsChanged();   // after a manual edit
+    void replaceAt (double onsetTime, drb::Instrument from, drb::Instrument to);   // no undo step, no hitsChanged
     void rebuildOnsets(); // one onset per distinct hit time
     const drb::Hit* borrowedHit (drb::Instrument) const;
     double borrowedSource (drb::Instrument) const;   // the sound a hit added by hand plays

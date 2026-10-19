@@ -32,6 +32,7 @@ struct InstrumentPlan
     PickMode mode = PickMode::Original;
     std::vector<SamplePtr> pool;   // the sounds to choose from (empty = originals)
     int fixed = 0;                 // which one for Fixed
+    double maxLength = 0.0;        // seconds a sound plays at most from the hit (0 = all of it), then fades out
 };
 
 struct RebuildSettings

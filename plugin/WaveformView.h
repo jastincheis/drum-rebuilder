@@ -34,6 +34,11 @@ public:
     // in their colours; a click on one says what it really is.
     void setInstrumentMode (bool on) { instrumentMode = on; }
 
+    // Instruments tab: several labels selected (Ctrl + click, Shift + drag
+    // a box), then a click on one of them changes them all.
+    bool clearSelection();   // false = nothing was selected
+    int getSelectionSize() const { return (int) selection.size(); }
+
     // Solo instruments: their hits stand out, the others fade.
     void setFocus (std::vector<drb::Instrument> instruments) { focus = std::move (instruments); repaint(); }
 
@@ -86,6 +91,15 @@ private:
     int sliceHit = -1, pillHit = -1;
     drb::Instrument pillInstrument = drb::Instrument::Kick;
     void showPillMenu (int hitIndex, drb::Instrument);
+
+    using Selected = std::pair<double, drb::Instrument>;   // onset time, instrument
+    std::vector<Selected> selection;
+    bool isSelected (double time, drb::Instrument) const;
+    void toggleSelected (double time, drb::Instrument);
+    void pruneSelection();   // drops what is no longer there
+    void showSelectionMenu();
+    bool lassoing = false, selectClick = false;
+    juce::Rectangle<int> lasso;
 
 
     juce::Rectangle<int> waveArea() const;

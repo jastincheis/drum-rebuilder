@@ -10,6 +10,9 @@
 // (it plays in a loop meanwhile, the dB shown by it), double-click or
 // Delete = remove it, right-click = more. Solo on a row = hear only it
 // (Ctrl / Shift: one more). Wheel = zoom, shift + wheel = move along.
+// Several hits: Ctrl + click (one more), Shift + click (all of that row up
+// to here), Ctrl / Shift + drag on an empty spot (a box); then dragging the
+// flag of one of them changes them all.
 class MidiEditorView : public juce::Component,
                        private juce::Timer,
                        private juce::ScrollBar::Listener
@@ -47,6 +50,15 @@ private:
     bool snap = true;
 
     int selected = -1;        // index into the hits
+    std::vector<int> picked;  // several hits selected (indices into the hits)
+    std::vector<float> pickedStart;   // their velocities when a drag began
+    int pickAnchor = -1;      // the last hit Ctrl / Shift + clicked
+    size_t shownHitCount = 0;
+    bool boxing = false;
+    juce::Rectangle<int> box;
+    bool isPicked (int index) const { return std::find (picked.begin(), picked.end(), index) != picked.end(); }
+    void clearPicked() { picked.clear(); pickAnchor = -1; repaint(); }
+    void showPickedMenu();
     int dragHit = -1;
     bool dragMoved = false, justAdded = false, velocityDrag = false;
     double dragOffset = 0.0;  // seconds between the mouse and the hit

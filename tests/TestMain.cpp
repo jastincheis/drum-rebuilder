@@ -270,6 +270,27 @@ void checkRebuild()
     const float got = estimatePitch (played, sr, Instrument::Kick);
     check (kickPitch > 0.0f && std::abs (got / kickPitch - 1.0f) < 0.06f, "keep pitch: the new kick is tuned to the beat's kick");
 
+    // 3b. A length on the instrument (Drum Rack): the sound stops there,
+    // for a sound from the folder and for the original alike.
+    {
+        RebuildSettings shortTone;
+        shortTone.instruments[(size_t) Instrument::Kick] = { PickMode::Fixed, { tone }, 0, 0.1 };
+        const auto cut = renderRebuild (one, shortTone, sr, 0.5);
+        const auto whole = renderRebuild (one, RebuildSettings { [&] { std::array<InstrumentPlan, numInstruments> p {}; p[(size_t) Instrument::Kick] = { PickMode::Fixed, { tone }, 0 }; return p; }() }, sr, 0.5);
+        const int t0 = (int) (one.hits[0].time * sr);
+        const bool toneCut = cut.getMagnitude (0, t0 + (int) (0.11 * sr), (int) (0.1 * sr)) < 1.0e-4f
+                             && whole.getMagnitude (0, t0 + (int) (0.11 * sr), (int) (0.1 * sr)) > 0.05f
+                             && cut.getMagnitude (0, t0, (int) (0.05 * sr)) > 0.05f;
+
+        RebuildSettings shortOriginal;
+        shortOriginal.instruments[(size_t) Instrument::Kick].maxLength = 0.03;
+        const auto cutOriginal = renderRebuild (one, shortOriginal, sr, 0.5);
+        const int s0 = (int) (one.hits[0].sourceTime() * sr);
+        const bool originalCut = cutOriginal.getMagnitude (0, s0 + (int) (0.031 * sr), kb - s0 - (int) (0.031 * sr)) < 1.0e-4f
+                                 && cutOriginal.getMagnitude (0, s0, (int) (0.02 * sr)) > 0.01f;
+        check (toneCut && originalCut, "a sound length cuts the sound there (folder sounds and originals)");
+    }
+
     // 4. Saving the originals into folders, and again (replaces them).
     juce::TemporaryFile tempDir;
     const auto root = tempDir.getFile();

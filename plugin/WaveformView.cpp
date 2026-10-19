@@ -50,6 +50,7 @@ void WaveformView::refresh()
     if (processor.getLoadedId() != shownId)
     {
         shownId = processor.getLoadedId();
+        selection.clear();
         buildPeaks();
         zoomToFit();
     }
@@ -426,9 +427,23 @@ void WaveformView::paint (juce::Graphics& g)
                 g.fillRoundedRectangle (label, 4.0f);
                 g.setColour (juce::Colours::black.withAlpha (dim ? 0.5f : 0.85f));
                 g.drawText (name, label, juce::Justification::centred, false);
+                if (isSelected (t, inst))
+                {
+                    g.setColour (juce::Colours::white);
+                    g.drawRoundedRectangle (label.expanded (1.5f), 5.0f, 2.0f);
+                    g.drawRoundedRectangle (bar.expanded (1.0f), 5.0f, 1.0f);
+                }
                 pills.push_back ({ label.toNearestInt(), bar.toNearestInt(), (int) i, hit, inst });
             }
         }
+    }
+
+    if (lassoing && ! lasso.isEmpty())
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.08f));
+        g.fillRect (lasso);
+        g.setColour (juce::Colours::white.withAlpha (0.7f));
+        g.drawRect (lasso, 1);
     }
 
     // Region.
@@ -505,9 +520,30 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
 {
     pillPressed = false;
     slicePart = PillPart::none;
+    lassoing = false;
+    selectClick = false;
     if (const Pill* pill = nullptr; instrumentMode)
     {
         const auto part = findPill (e.getPosition(), pill);
+        // Ctrl (Cmd) or Shift + click on a label: in / out of the selection.
+        if (part == PillPart::label && ! e.mods.isPopupMenu() && (e.mods.isCommandDown() || e.mods.isShiftDown()))
+        {
+            grab = Grab::none;
+            dragging = false;
+            toggleSelected (processor.getAnalysis().onsets[(size_t) pill->onset].time, pill->instrument);
+            selectClick = true;
+            return;
+        }
+        // Shift (or Ctrl) + drag on the waveform: a box selecting labels.
+        if (part == PillPart::none && ! e.mods.isPopupMenu() && (e.mods.isShiftDown() || e.mods.isCommandDown())
+            && waveArea().contains (e.getPosition()))
+        {
+            grab = Grab::none;
+            dragging = false;
+            lassoing = true;
+            lasso = {};
+            return;
+        }
         if (part != PillPart::none)
         {
             grab = Grab::none;
@@ -608,8 +644,14 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
 
 void WaveformView::mouseDrag (const juce::MouseEvent& e)
 {
-    if (pillPressed)
+    if (pillPressed || selectClick)
         return;
+    if (lassoing)
+    {
+        lasso = juce::Rectangle<int> (e.getMouseDownPosition(), e.getPosition()).getIntersection (waveArea());
+        repaint();
+        return;
+    }
     if (slicePart != PillPart::none)
     {
         // Drag IN or OUT; the other end stays.
@@ -652,10 +694,37 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
 
 void WaveformView::mouseUp (const juce::MouseEvent& e)
 {
+    if (selectClick)
+    {
+        selectClick = false;
+        return;
+    }
     if (pillPressed)
     {
         pillPressed = false;
-        showPillMenu (pillHit, pillInstrument);
+        // On one of several selected: they all change. Else just this one.
+        pruneSelection();
+        const auto& onsets = processor.getAnalysis().onsets;
+        if (juce::isPositiveAndBelow (pillHit, (int) onsets.size()) && selection.size() > 1
+            && isSelected (onsets[(size_t) pillHit].time, pillInstrument))
+            showSelectionMenu();
+        else
+        {
+            clearSelection();
+            showPillMenu (pillHit, pillInstrument);
+        }
+        return;
+    }
+    if (lassoing)
+    {
+        lassoing = false;
+        const auto& onsets = processor.getAnalysis().onsets;
+        for (const auto& pill : pills)
+            if ((lasso.intersects (pill.label) || lasso.intersects (pill.bar)) && juce::isPositiveAndBelow (pill.onset, (int) onsets.size())
+                && ! isSelected (onsets[(size_t) pill.onset].time, pill.instrument))
+                selection.push_back ({ onsets[(size_t) pill.onset].time, pill.instrument });
+        lasso = {};
+        repaint();
         return;
     }
     if (slicePart != PillPart::none)
@@ -687,7 +756,9 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
     }
     else
     {
-        // A click clears the region and moves the playhead there.
+        // A click clears the region (and the selected labels) and moves the
+        // playhead there.
+        clearSelection();
         processor.setRegion ({});
         processor.setPlayheadSeconds (dragAnchor);
     }
@@ -765,6 +836,73 @@ void WaveformView::showMenu (const juce::MouseEvent& e)
                     processor.setFirstDownbeat (t);
             });
     }
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
+}
+
+bool WaveformView::isSelected (double time, drb::Instrument inst) const
+{
+    return std::any_of (selection.begin(), selection.end(),
+                        [&] (const Selected& s) { return s.second == inst && std::abs (s.first - time) < 1.0e-9; });
+}
+
+void WaveformView::toggleSelected (double time, drb::Instrument inst)
+{
+    const auto it = std::find_if (selection.begin(), selection.end(),
+                                  [&] (const Selected& s) { return s.second == inst && std::abs (s.first - time) < 1.0e-9; });
+    if (it != selection.end())
+        selection.erase (it);
+    else
+        selection.push_back ({ time, inst });
+    repaint();
+}
+
+bool WaveformView::clearSelection()
+{
+    if (selection.empty())
+        return false;
+    selection.clear();
+    repaint();
+    return true;
+}
+
+void WaveformView::pruneSelection()
+{
+    const auto& hits = processor.getAnalysis().hits;
+    selection.erase (std::remove_if (selection.begin(), selection.end(), [&] (const Selected& s)
+                     {
+                         return std::none_of (hits.begin(), hits.end(), [&] (const drb::Hit& h)
+                                              { return h.instrument == s.second && std::abs (h.time - s.first) < 1.0e-9; });
+                     }),
+                     selection.end());
+}
+
+// A click on one of several selected labels: what they all really are.
+void WaveformView::showSelectionMenu()
+{
+    juce::WeakReference<juce::Component> self (this);
+    juce::PopupMenu menu;
+    menu.addSectionHeader ("These " + juce::String ((int) selection.size()) + " are all really:");
+    for (auto to : drb::allInstruments)
+        menu.addItem (drb::instrumentName (to), [this, self, to]
+        {
+            if (self == nullptr)
+                return;
+            processor.replaceInstruments (selection, to);
+            selection.clear();
+        });
+    menu.addSeparator();
+    menu.addItem ("Not hits at all (delete them)", [this, self]
+    {
+        if (self == nullptr)
+            return;
+        processor.removeInstruments (selection);
+        selection.clear();
+    });
+    menu.addItem ("Clear the selection", [this, self]
+    {
+        if (self != nullptr)
+            clearSelection();
+    });
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 

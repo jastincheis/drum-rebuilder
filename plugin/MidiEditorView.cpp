@@ -157,6 +157,13 @@ void MidiEditorView::refresh()
     }
     if (selected >= (int) processor.getAnalysis().hits.size())
         selected = -1;
+    // Hits added or removed (here or by undo): the indices no longer hold.
+    if (processor.getAnalysis().hits.size() != shownHitCount)
+    {
+        shownHitCount = processor.getAnalysis().hits.size();
+        picked.clear();
+        pickAnchor = -1;
+    }
     repaint();
 }
 
@@ -314,10 +321,12 @@ void MidiEditorView::paint (juce::Graphics& g)
         g.setColour (juce::Colours::black.withAlpha (0.6f));
         for (int k = 0; k < 2; ++k)   // grip lines
             g.drawHorizontalLine ((int) flag.getY() + 4 + 3 * k, flag.getX() + 3.0f, flag.getRight() - 3.0f);
-        if ((int) i == selected)
+        if ((int) i == selected || isPicked ((int) i))
         {
             g.setColour (juce::Colours::white);
             g.drawRoundedRectangle (box.expanded (1.5f), 3.0f, 2.0f);
+            if (isPicked ((int) i))
+                g.drawRoundedRectangle (flag.expanded (1.0f), 3.0f, 1.5f);
         }
         if (h.confidence < 0.5f && ! h.manual)
         {
@@ -342,6 +351,13 @@ void MidiEditorView::paint (juce::Graphics& g)
         g.fillRoundedRectangle (label, 4.0f);
         g.setColour (db > 0.0f ? juce::Colours::red : juce::Colours::white);
         g.drawText (text, label, juce::Justification::centred);
+    }
+    if (boxing && ! box.isEmpty())
+    {
+        g.setColour (juce::Colours::white.withAlpha (0.08f));
+        g.fillRect (box);
+        g.setColour (juce::Colours::white.withAlpha (0.7f));
+        g.drawRect (box, 1);
     }
     g.restoreState();
 
@@ -377,6 +393,7 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
             return;
         }
 
+    boxing = false;
     const int hit = hitAt (e.getPosition());
     if (e.mods.isPopupMenu())
     {
@@ -384,23 +401,67 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
         {
             selected = hit;
             repaint();
-            showHitMenu (hit);
+            if (picked.size() > 1 && isPicked (hit))
+                showPickedMenu();
+            else
+            {
+                clearPicked();
+                showHitMenu (hit);
+            }
         }
+        return;
+    }
+
+    const bool ctrl = e.mods.isCommandDown(), shift = e.mods.isShiftDown();
+    if (hit >= 0 && (ctrl || shift) && ! onVelocityEdge (hit, e.getPosition()))
+    {
+        // Ctrl: this one in / out. Shift: every hit of its row from the
+        // last one picked up to here.
+        const auto& hits = processor.getAnalysis().hits;
+        if (picked.empty() && selected >= 0 && selected != hit)
+            picked.push_back (selected);
+        if (shift && juce::isPositiveAndBelow (pickAnchor, (int) hits.size())
+            && hits[(size_t) pickAnchor].instrument == hits[(size_t) hit].instrument)
+        {
+            const auto inst = hits[(size_t) hit].instrument;
+            for (int i = std::min (pickAnchor, hit); i <= std::max (pickAnchor, hit); ++i)
+                if (hits[(size_t) i].instrument == inst && ! isPicked (i))
+                    picked.push_back (i);
+        }
+        else if (isPicked (hit))
+            picked.erase (std::find (picked.begin(), picked.end(), hit));
+        else
+            picked.push_back (hit);
+        pickAnchor = hit;
+        selected = hit;
+        repaint();
+        return;
+    }
+    if (hit < 0 && (ctrl || shift) && laneAt (e.y) >= 0 && e.x >= laneArea().getX())
+    {
+        boxing = true;   // a box picking the hits in it
+        box = {};
         return;
     }
 
     if (hit >= 0)
     {
+        if (! isPicked (hit))
+            picked.clear();
         selected = dragHit = hit;
         dragOffset = xToSeconds ((float) e.x) - processor.getAnalysis().hits[(size_t) hit].time;
         velocityDrag = onVelocityEdge (hit, e.getPosition());
         velocityAtStart = processor.getAnalysis().hits[(size_t) hit].velocity;
         grabbedAbove = (float) e.y < hitBox (hit).getCentreY();
+        pickedStart.clear();
+        for (int i : picked)
+            pickedStart.push_back (processor.getAnalysis().hits[(size_t) i].velocity);
     }
     else if (const int lane = laneAt (e.y); lane >= 0 && e.x >= laneArea().getX() && e.getNumberOfClicks() == 1)
     {
         // A new hit, medium-hard, with its instrument's own sound (one it
         // plays alone in the recording); it can be dragged right away.
+        picked.clear();
         selected = dragHit = processor.addHitAt (place (xToSeconds ((float) e.x), e.mods.isAltDown()), lanes[(size_t) lane], 0.8f);
         dragOffset = 0.0;
         justAdded = dragHit >= 0;
@@ -414,6 +475,12 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
 
 void MidiEditorView::mouseDrag (const juce::MouseEvent& e)
 {
+    if (boxing)
+    {
+        box = juce::Rectangle<int> (e.getMouseDownPosition(), e.getPosition()).getIntersection (laneArea());
+        repaint();
+        return;
+    }
     if (dragHit < 0 || (! dragMoved && e.getDistanceFromDragStart() < 3))
         return;
 
@@ -433,10 +500,21 @@ void MidiEditorView::mouseDrag (const juce::MouseEvent& e)
         const auto r = laneBounds (laneOf (processor.getAnalysis().hits[(size_t) dragHit].instrument));
         const float moved = (float) (grabbedAbove ? -e.getDistanceFromDragStartY() : e.getDistanceFromDragStartY());
         const float perPixel = 1.0f / (0.3f * (float) r.getHeight()) * (e.mods.isShiftDown() ? 0.25f : 1.0f);
-        processor.setHitVelocity (dragHit, juce::jlimit (0.05f, 1.0f, velocityAtStart + moved * perPixel), false);
+        const float delta = moved * perPixel;
+        if (picked.size() > 1 && isPicked (dragHit) && pickedStart.size() == picked.size())
+        {
+            // All the selected ones, by the same amount.
+            std::vector<std::pair<int, float>> changes;
+            for (size_t k = 0; k < picked.size(); ++k)
+                changes.push_back ({ picked[k], pickedStart[k] + delta });
+            processor.setHitVelocities (changes, false);
+        }
+        else
+            processor.setHitVelocity (dragHit, juce::jlimit (0.05f, 1.0f, velocityAtStart + delta), false);
         repaint();
         return;
     }
+    picked.clear();   // moving a hit: just that one
 
     const int lane = juce::jlimit (0, numLanes() - 1, laneAt (juce::jlimit (laneArea().getY(), laneArea().getBottom() - 1, e.y)));
     const double t = place (xToSeconds ((float) e.x) - dragOffset, e.mods.isAltDown());
@@ -474,6 +552,22 @@ void MidiEditorView::mouseExit (const juce::MouseEvent&)
 
 void MidiEditorView::mouseUp (const juce::MouseEvent& e)
 {
+    if (boxing)
+    {
+        boxing = false;
+        if (! box.isEmpty())
+        {
+            const auto& hits = processor.getAnalysis().hits;
+            if (picked.empty() && selected >= 0)
+                picked.push_back (selected);
+            for (int i = 0; i < (int) hits.size(); ++i)
+                if (laneOf (hits[(size_t) i].instrument) >= 0 && box.toFloat().intersects (hitBox (i)) && ! isPicked (i))
+                    picked.push_back (i);
+        }
+        box = {};
+        repaint();
+        return;
+    }
     if (hitPreviewing)
     {
         hitPreviewing = false;
@@ -520,8 +614,60 @@ void MidiEditorView::showHitMenu (int hit)
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 
+// Right-click on one of several selected hits: for all of them.
+void MidiEditorView::showPickedMenu()
+{
+    juce::PopupMenu menu;
+    juce::WeakReference<juce::Component> self (this);
+    const auto setAll = [this, self] (std::function<float (float)> f)
+    {
+        if (self == nullptr)
+            return;
+        std::vector<std::pair<int, float>> changes;
+        for (int i : picked)
+            if (juce::isPositiveAndBelow (i, (int) processor.getAnalysis().hits.size()))
+                changes.push_back ({ i, f (processor.getAnalysis().hits[(size_t) i].velocity) });
+        processor.setHitVelocities (changes);
+    };
+    menu.addSectionHeader (juce::String ((int) picked.size()) + " hits selected");
+    menu.addItem ("Louder (+10 %)", [setAll] { setAll ([] (float v) { return v + 0.1f; }); });
+    menu.addItem ("Quieter (-10 %)", [setAll] { setAll ([] (float v) { return v - 0.1f; }); });
+    juce::PopupMenu same;
+    for (int percent : { 100, 75, 50, 25 })
+        same.addItem (juce::String (percent) + " %", [setAll, percent] { setAll ([percent] (float) { return (float) percent / 100.0f; }); });
+    menu.addSubMenu ("All as hard as", same);
+    menu.addSeparator();
+    menu.addItem ("Delete them", [this, self]
+    {
+        if (self == nullptr)
+            return;
+        processor.deleteHitsAt (picked);
+        picked.clear();
+        selected = -1;
+    });
+    menu.addItem ("Clear the selection", [this, self]
+    {
+        if (self != nullptr)
+            clearPicked();
+    });
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
+}
+
 bool MidiEditorView::keyPressed (const juce::KeyPress& key)
 {
+    if (key == juce::KeyPress::escapeKey && ! picked.empty())
+    {
+        clearPicked();
+        return true;
+    }
+    if ((key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey) && picked.size() > 1)
+    {
+        processor.deleteHitsAt (picked);
+        picked.clear();
+        selected = -1;
+        repaint();
+        return true;
+    }
     if ((key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey) && selected >= 0)
     {
         processor.deleteHitAt (selected);

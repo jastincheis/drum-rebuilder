@@ -4,6 +4,7 @@
 #include "WaveformView.h"
 
 class ImportPage;
+class OpenPanel;
 class AnalysisPage;
 class InstrumentsPage;
 class MidiEditorPage;
@@ -51,7 +52,7 @@ private:
     DrumRackPage* rackPage = nullptr;          // owned by tabs
     ExportPage* exportPage = nullptr;       // owned by tabs
 
-    std::unique_ptr<juce::FileChooser> chooser;
+    std::unique_ptr<OpenPanel> openPanel;   // the Open panel, while shown
     juce::Component* lastPage = nullptr;   // the tab shown at the last timer tick
     int shownId = -1;
 

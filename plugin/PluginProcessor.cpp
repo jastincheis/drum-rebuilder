@@ -477,6 +477,7 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
             p->rebuiltAtDevice.reset();
             p->tempoFactor = 1.0;
             p->keepPitch = false;
+            p->soundLengths.fill (0.0);
             p->chooseDefaultSounds();
             p->soundHistory.clear();
             p->soundPos = 0;
@@ -489,6 +490,9 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
                 const auto modes = r.getProperty ("modes").toString();
                 const auto files = juce::StringArray::fromTokens (r.getProperty ("fixed").toString(), "|", "");
                 const auto change = r.getProperty ("changing").toString();
+                const auto lengths = juce::StringArray::fromTokens (r.getProperty ("lengths").toString(), " ", "");
+                for (int i = 0; i < drb::numInstruments && i < lengths.size(); ++i)
+                    p->soundLengths[(size_t) i] = juce::jlimit (0.0, 10.0, lengths[i].getDoubleValue());
                 for (int i = 0; i < drb::numInstruments; ++i)
                 {
                     if (i < modes.length())
@@ -675,7 +679,12 @@ void DrumRebuilderProcessor::replaceInstrument (int index, drb::Instrument from,
     if (! juce::isPositiveAndBelow (index, (int) analysis.onsets.size()) || from == to)
         return;
     beginHitEdit();
-    const double t = analysis.onsets[(size_t) index].time;
+    replaceAt (analysis.onsets[(size_t) index].time, from, to);
+    hitsChanged();
+}
+
+void DrumRebuilderProcessor::replaceAt (double t, drb::Instrument from, drb::Instrument to)
+{
     auto& hits = analysis.hits;
     const auto atT = [t] (const drb::Hit& h) { return std::abs (h.time - t) < 1.0e-9; };
 
@@ -693,6 +702,36 @@ void DrumRebuilderProcessor::replaceInstrument (int index, drb::Instrument from,
             }
             break;
         }
+}
+
+void DrumRebuilderProcessor::replaceInstruments (const std::vector<std::pair<double, drb::Instrument>>& which, drb::Instrument to)
+{
+    if (which.empty())
+        return;
+    beginHitEdit();
+    for (const auto& [t, from] : which)
+        if (from != to)
+            replaceAt (t, from, to);
+    hitsChanged();
+}
+
+void DrumRebuilderProcessor::removeInstruments (const std::vector<std::pair<double, drb::Instrument>>& which)
+{
+    if (which.empty())
+        return;
+    beginHitEdit();
+    auto& hits = analysis.hits;
+    for (const auto& [t, inst] : which)
+    {
+        hits.erase (std::remove_if (hits.begin(), hits.end(),
+                                    [t = t, inst = inst] (const drb::Hit& h) { return std::abs (h.time - t) < 1.0e-9 && h.instrument == inst; }),
+                    hits.end());
+        // Nothing left at that onset: the marker goes too.
+        if (std::none_of (hits.begin(), hits.end(), [t = t] (const drb::Hit& h) { return std::abs (h.time - t) < 1.0e-9; }))
+            analysis.onsets.erase (std::remove_if (analysis.onsets.begin(), analysis.onsets.end(),
+                                                   [t = t] (const auto& o) { return std::abs (o.time - t) < 1.0e-9; }),
+                                   analysis.onsets.end());
+    }
     hitsChanged();
 }
 
@@ -777,6 +816,41 @@ void DrumRebuilderProcessor::deleteHitAt (int hitIndex)
     beginHitEdit();
     analysis.hits.erase (analysis.hits.begin() + hitIndex);
     rebuildOnsets();
+    hitsChanged();
+}
+
+void DrumRebuilderProcessor::deleteHitsAt (std::vector<int> indices)
+{
+    std::sort (indices.begin(), indices.end(), std::greater<int>());
+    indices.erase (std::unique (indices.begin(), indices.end()), indices.end());
+    indices.erase (std::remove_if (indices.begin(), indices.end(),
+                                   [this] (int i) { return ! juce::isPositiveAndBelow (i, (int) analysis.hits.size()); }),
+                   indices.end());
+    if (indices.empty())
+        return;
+    beginHitEdit();
+    for (int i : indices)   // from the last, so the others keep their place
+        analysis.hits.erase (analysis.hits.begin() + i);
+    rebuildOnsets();
+    hitsChanged();
+}
+
+void DrumRebuilderProcessor::setHitVelocities (const std::vector<std::pair<int, float>>& changes, bool undoStep)
+{
+    if (changes.empty())
+        return;
+    if (undoStep)
+        beginHitEdit();
+    for (const auto& [index, velocity] : changes)
+    {
+        if (! juce::isPositiveAndBelow (index, (int) analysis.hits.size()))
+            continue;
+        auto& h = analysis.hits[(size_t) index];
+        if (h.soundVelocity < 0.0f)
+            h.soundVelocity = h.velocity;
+        h.velocity = juce::jlimit (0.05f, 1.0f, velocity);
+        h.manual = true;
+    }
     hitsChanged();
 }
 
@@ -1329,6 +1403,49 @@ void DrumRebuilderProcessor::previousSounds()
         applySounds (soundHistory[--soundPos]);
 }
 
+void DrumRebuilderProcessor::setSoundLength (drb::Instrument i, double seconds)
+{
+    soundLengths[(size_t) i] = juce::jlimit (0.0, 10.0, seconds);
+    requestRender();
+    sendChangeMessage();
+}
+
+drb::SamplePtr DrumRebuilderProcessor::getRowSound (drb::Instrument inst) const
+{
+    if (pickModes[(size_t) inst] != drb::PickMode::Original)
+    {
+        if (auto s = getFixedSample (inst))
+            return s;
+        const auto pool = getPool (inst);
+        if (! pool.empty())
+            return pool.front();
+    }
+    // Its loudest hit, as the recording has it (from the hit to its OUT).
+    if (loaded == nullptr)
+        return nullptr;
+    int loudest = -1;
+    for (size_t h = 0; h < analysis.hits.size(); ++h)
+        if (analysis.hits[h].instrument == inst && ! analysis.hits[h].added
+            && (loudest < 0 || analysis.hits[h].velocity > analysis.hits[(size_t) loudest].velocity))
+            loudest = (int) h;
+    if (loudest < 0)
+        return nullptr;
+    const auto [in, out] = getSourceSlice (loudest);
+    const double sr = loaded->sampleRate;
+    const int a = juce::jlimit (0, loaded->audio.getNumSamples(), (int) (analysis.hits[(size_t) loudest].sourceTime() * sr));
+    const int b = juce::jlimit (a, loaded->audio.getNumSamples(), (int) std::ceil (out * sr));
+    if (b - a < 16)
+        return nullptr;
+    auto s = std::make_shared<drb::Sample>();
+    s->audio.setSize (loaded->audio.getNumChannels(), b - a);
+    for (int ch = 0; ch < loaded->audio.getNumChannels(); ++ch)
+        s->audio.copyFrom (ch, 0, loaded->audio, ch, a, b - a);
+    s->sampleRate = sr;
+    s->original = true;
+    s->peak = s->audio.getMagnitude (0, b - a);
+    return s;
+}
+
 void DrumRebuilderProcessor::setKeepPitch (bool on)
 {
     keepPitch = on;
@@ -1376,6 +1493,7 @@ drb::RebuildSettings DrumRebuilderProcessor::makeRebuildSettings() const
     {
         auto& plan = settings.instruments[(size_t) i];
         plan.mode = pickModes[(size_t) i];
+        plan.maxLength = soundLengths[(size_t) i];
         if (plan.mode == drb::PickMode::Original)
             continue;
         plan.pool = getPool (i);
@@ -1536,6 +1654,10 @@ juce::ValueTree DrumRebuilderProcessor::makeBeatState() const
     r.setProperty ("changing", change, nullptr);
     r.setProperty ("keepPitch", keepPitch, nullptr);
     r.setProperty ("tempoFactor", tempoFactor, nullptr);
+    juce::StringArray lengths;
+    for (auto len : soundLengths)
+        lengths.add (juce::String (len, 4));
+    r.setProperty ("lengths", lengths.joinIntoString (" "), nullptr);
     beat.addChild (r, -1, nullptr);
     return beat;
 }

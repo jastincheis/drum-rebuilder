@@ -137,8 +137,10 @@ class ImportPage : public juce::Component,
                    private juce::Timer
 {
 public:
-    explicit ImportPage (DrumRebuilderProcessor& p)
+    // inDialog: the page inside the Open window, which closes once a beat opens.
+    explicit ImportPage (DrumRebuilderProcessor& p, bool inDialogWindow = false)
         : processor (p),
+          inDialog (inDialogWindow),
           filter (drb::supportedWildcard(), "*", "Audio files"),
           browser (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
                        | juce::FileBrowserComponent::filenameBoxIsReadOnly,
@@ -159,7 +161,7 @@ public:
         openButton.onClick = [this]
         {
             if (processor.getPreview() != nullptr)
-                processor.loadFile (processor.getPreviewFile());
+                open (processor.getPreviewFile());
         };
 
         setupLabel (title, theme::text, 18.0f);
@@ -176,11 +178,31 @@ public:
         for (auto* l : { &title, &details, &current, &help })
             addAndMakeVisible (l);
 
+        if (inDialog)
+            setWantsKeyboardFocus (true);
         update();
         startTimerHz (30);
     }
 
-    ~ImportPage() override { browser.removeListener (this); }
+    ~ImportPage() override
+    {
+        browser.removeListener (this);
+        if (inDialog)
+            processor.stopPreview();
+    }
+
+    std::function<void()> onOpened;   // a beat was opened from here
+
+    // In the Open window Space is ours (in the editor, the editor's).
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (inDialog && key == juce::KeyPress::spaceKey)
+        {
+            togglePreview();
+            return true;
+        }
+        return false;
+    }
 
     // Space on this page plays / stops the preview; false = nothing to play.
     bool togglePreview()
@@ -257,6 +279,7 @@ public:
 
 private:
     DrumRebuilderProcessor& processor;
+    const bool inDialog;
     juce::WildcardFileFilter filter;
     juce::FileBrowserComponent browser;
     PreviewWave wave;
@@ -290,7 +313,14 @@ private:
     void fileDoubleClicked (const juce::File& f) override
     {
         if (f.existsAsFile())
-            processor.loadFile (f);
+            open (f);
+    }
+
+    void open (const juce::File& f)
+    {
+        processor.loadFile (f);
+        if (onOpened != nullptr)
+            onOpened();
     }
 
     void browserRootChanged (const juce::File& folder) override { processor.setBrowseFolder (folder); }
@@ -304,9 +334,94 @@ private:
         if (p.isPlaying() || playheadWasMoving)
             wave.repaint();
         playheadWasMoving = p.isPlaying();
+        if (inDialog && ++ticks % 6 == 0)   // the editor updates its own page
+            update();
     }
 
     bool playheadWasMoving = false;
+    int ticks = 0;
+};
+
+// The Open window: the Import page's browser over the whole editor, inside
+// it (a separate window gets tiled by some window managers and hides behind
+// plugin hosts). Click a file = hear it; opening a beat, Close or Escape
+// shut it.
+class OpenPanel : public juce::Component
+{
+public:
+    explicit OpenPanel (DrumRebuilderProcessor& p) : page (p, true)
+    {
+        setupLabel (title, theme::text, 18.0f);
+        title.setText ("Open a drums-only recording", juce::dontSendNotification);
+        closeButton.setWantsKeyboardFocus (false);
+        closeButton.onClick = [this] { close(); };
+        page.onOpened = [this] { close(); };
+        addAndMakeVisible (title);
+        addAndMakeVisible (closeButton);
+        addAndMakeVisible (page);
+        setWantsKeyboardFocus (true);
+    }
+
+    std::function<void()> onClose;
+
+    void close()
+    {
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<OpenPanel> (this)]
+                                         {
+                                             if (safe != nullptr && safe->onClose != nullptr)
+                                                 safe->onClose();
+                                         });
+    }
+
+    bool keyPressed (const juce::KeyPress& key) override
+    {
+        if (key == juce::KeyPress::escapeKey)
+        {
+            close();
+            return true;
+        }
+        if (key == juce::KeyPress::spaceKey)
+        {
+            page.togglePreview();
+            return true;
+        }
+        return false;
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (juce::Colours::black.withAlpha (0.55f));
+        g.setColour (theme::background);
+        g.fillRect (panelArea());
+        g.setColour (theme::textDim.withAlpha (0.4f));
+        g.drawRect (panelArea());
+    }
+
+    void resized() override
+    {
+        auto r = panelArea().reduced (1);
+        auto top = r.removeFromTop (40).reduced (12, 6);
+        closeButton.setBounds (top.removeFromRight (90));
+        title.setBounds (top);
+        page.setBounds (r);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override   // outside the panel
+    {
+        if (! panelArea().contains (e.getPosition()))
+            close();
+    }
+
+private:
+    ImportPage page;
+    juce::Label title;
+    juce::TextButton closeButton { "Close" };
+
+    juce::Rectangle<int> panelArea() const
+    {
+        return getLocalBounds().withSizeKeepingCentre (juce::jmin (1000, getWidth() - 24),
+                                                       juce::jmin (640, getHeight() - 24));
+    }
 };
 
 // --- Solo ----------------------------------------------------------------
@@ -530,7 +645,7 @@ public:
         fit.onClick = [this] { waveform.zoomToFit(); };
 
         setupLabel (hint, theme::textDim, 12.5f);
-        hint.setText ("Click a label: what it really is    Right-click the waveform: add a hit    Drag a marker: move it"
+        hint.setText ("Click a label: what it really is    Ctrl + click / Shift + drag: select several, click one: change all    Right-click the waveform: add a hit    Drag a marker: move it"
                       "    Wheel, Up / Down: zoom    Space: play / stop (only the solo ones)",
                       juce::dontSendNotification);
         hint.setJustificationType (juce::Justification::centredRight);
@@ -575,6 +690,30 @@ private:
 
 // --- MIDI Editor ---------------------------------------------------------
 
+// "Save the drums as MIDI" (from the MIDI Editor and the Export tab): asks
+// where, next to the beat by default; `done` gets what to show after.
+static void saveDrumsMidi (DrumRebuilderProcessor& processor, std::unique_ptr<juce::FileChooser>& chooser,
+                           std::function<void (const juce::String&)> done)
+{
+    const auto* l = processor.getLoaded();
+    if (l == nullptr)
+        return;
+    const auto suggested = l->file.getParentDirectory().getChildFile (l->file.getFileNameWithoutExtension() + " drums.mid");
+    chooser = std::make_unique<juce::FileChooser> ("Save the drums as MIDI", suggested, "*.mid");
+    juce::WeakReference<DrumRebuilderProcessor> safe (&processor);
+    chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                              | juce::FileBrowserComponent::warnAboutOverwriting,
+                          [safe, done] (const juce::FileChooser& fc)
+                          {
+                              if (safe == nullptr || fc.getResult() == juce::File())
+                                  return;
+                              const auto file = fc.getResult().withFileExtension ("mid");
+                              const auto& a = safe->getAnalysis();
+                              const bool ok = drb::writeMidiFile (file, a.hits, a.grid);
+                              done (ok ? "Saved " + file.getFileName() : "Could not save " + file.getFullPathName());
+                          });
+}
+
 class MidiEditorPage : public juce::Component
 {
 public:
@@ -608,11 +747,23 @@ public:
         strength.setColour (juce::Slider::trackColourId, theme::accent.withAlpha (0.7f));
         addAndMakeVisible (strength);
 
-        for (auto* b : { &quantizeButton, &undoButton, &redoButton, &zoomOut, &zoomIn, &fit })
+        for (auto* b : { &quantizeButton, &undoButton, &redoButton, &saveMidiButton, &zoomOut, &zoomIn, &fit })
         {
             b->setWantsKeyboardFocus (false);
             addAndMakeVisible (b);
         }
+        saveMidiButton.setTooltip ("Save the drums as a MIDI file (one track per instrument, as they are now)");
+        saveMidiButton.onClick = [this]
+        {
+            juce::Component::SafePointer<MidiEditorPage> self (this);
+            saveDrumsMidi (processor, chooser, [self] (const juce::String& text)
+            {
+                if (self != nullptr)
+                    self->savedLabel.setText (text, juce::dontSendNotification);
+            });
+        };
+        setupLabel (savedLabel, theme::accent, 13.0f);
+        addAndMakeVisible (savedLabel);
         quantizeButton.setTooltip ("Move every hit towards the grid");
         quantizeButton.onClick = [this] { processor.quantizeHits (division(), strength.getValue() / 100.0); };
         undoButton.onClick = [this] { processor.undo(); };
@@ -623,7 +774,8 @@ public:
 
         setupLabel (hint, theme::textDim, 12.5f);
         hint.setText ("Solo: hear only that row (Ctrl: one more)    Click an empty spot: add a hit    Drag: move it (onto another row: change the instrument)"
-                      "    Drag its flag up / down: louder / softer (it loops meanwhile)    Double-click or Delete: remove    Ctrl+Z: undo",
+                      "    Drag its flag up / down: louder / softer (it loops meanwhile)    Double-click or Delete: remove    Ctrl+Z: undo"
+                      "    Several: Ctrl + click, Shift + click (the row up to here), Shift + drag a box - then drag one flag: all of them",
                       juce::dontSendNotification);
         addAndMakeVisible (hint);
         update();
@@ -635,6 +787,12 @@ public:
         undoButton.setEnabled (processor.canUndo());
         redoButton.setEnabled (processor.canRedo());
         quantizeButton.setEnabled (processor.getLoaded() != nullptr && processor.getAnalysis().grid.bpm > 0.0);
+        saveMidiButton.setEnabled (processor.getLoaded() != nullptr && ! processor.getAnalysis().hits.empty());
+        if (processor.getLoadedId() != savedFor)
+        {
+            savedFor = processor.getLoadedId();
+            savedLabel.setText ({}, juce::dontSendNotification);
+        }
     }
 
     MidiEditorView& getView() { return view; }
@@ -662,12 +820,17 @@ public:
         undoButton.setBounds (bar.removeFromLeft (60).reduced (0, 1));
         bar.removeFromLeft (4);
         redoButton.setBounds (bar.removeFromLeft (60).reduced (0, 1));
+        bar.removeFromLeft (16);
+        saveMidiButton.setBounds (bar.removeFromLeft (100).reduced (0, 1));
+        bar.removeFromLeft (8);
 
         fit.setBounds (bar.removeFromRight (52).reduced (0, 1));
         bar.removeFromRight (4);
         zoomIn.setBounds (bar.removeFromRight (34).reduced (0, 1));
         bar.removeFromRight (4);
         zoomOut.setBounds (bar.removeFromRight (34).reduced (0, 1));
+        bar.removeFromRight (8);
+        savedLabel.setBounds (bar);
     }
 
 private:
@@ -678,6 +841,10 @@ private:
     juce::ToggleButton snapButton { "Snap" };
     juce::Slider strength { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     juce::TextButton quantizeButton { "Quantize" }, undoButton { "Undo" }, redoButton { "Redo" };
+    juce::TextButton saveMidiButton { "Save MIDI..." };
+    juce::Label savedLabel;
+    int savedFor = -1;
+    std::unique_ptr<juce::FileChooser> chooser;
     juce::TextButton zoomOut { "-" }, zoomIn { "+" }, fit { "Fit" };
 
     double division() const
@@ -753,13 +920,55 @@ public:
         setupLabel (help, theme::textDim, 13.0f);
         setupLabel (result, theme::accent, 14.0f);
         help.setJustificationType (juce::Justification::topLeft);
-        help.setText ("The sounds in each instrument's folder. Click = listen (Space too). Drag sound files from your file manager onto an "
+        help.setText ("The sounds in each instrument's folder. Click = listen (Space too). Up / Down: the next sound, it plays; "
+                      "Left: to the folders (Up / Down between them), Right: into the folder. Drag sound files from your file manager onto an "
                       "instrument to add them; drag a sound up / down to put it in your order (right-click: put first). "
                       "The orange button saves every hit of this beat (cut between its IN and OUT) as \"<beat> (original) 01.wav\".",
                       juce::dontSendNotification);
         for (auto* l : { &rootLabel, &help, &result })
             addAndMakeVisible (l);
         update();
+    }
+
+    // The arrows, like a file manager: Up / Down go through the sounds of
+    // the folder (each one plays) or, after Left, through the instrument
+    // folders; Right goes into the folder (its first sound plays).
+    bool arrowKey (const juce::KeyPress& key)
+    {
+        if (key == juce::KeyPress::leftKey)
+        {
+            if (! inFolders)
+            {
+                inFolders = true;
+                processor.stopPreview();
+                repaint();
+            }
+            return true;
+        }
+        if (key == juce::KeyPress::rightKey)
+        {
+            if (inFolders)
+            {
+                inFolders = false;
+                repaint();
+                if (sounds.getSelectedRow() < 0)
+                    step (1);
+                else if (auto s = selectedSample())
+                    processor.previewSample (*s);
+            }
+            return true;
+        }
+        if (key != juce::KeyPress::upKey && key != juce::KeyPress::downKey)
+            return false;
+        const int delta = key == juce::KeyPress::upKey ? -1 : 1;
+        if (inFolders)
+        {
+            const int row = juce::jlimit (0, drb::numInstruments - 1, instruments.getSelectedRow() + delta);
+            instruments.selectRow (row);   // its sounds show on the right
+        }
+        else
+            step (delta);
+        return true;
     }
 
     // The sound above (-1) or below (+1) the selected one, played.
@@ -869,6 +1078,10 @@ public:
 
     void paintOverChildren (juce::Graphics& g) override
     {
+        // Which list the arrows move in.
+        g.setColour (theme::accent.withAlpha (0.8f));
+        g.drawRect ((inFolders ? instruments : sounds).getBounds().expanded (2), 2);
+
         // Where a dragged sound goes: a line between the rows.
         if (dropIndex >= 0)
         {
@@ -945,6 +1158,7 @@ private:
         return juce::isPositiveAndBelow (row, (int) list.size()) ? list[(size_t) row] : nullptr;
     }
 
+    bool inFolders = false;   // the arrows move in the instruments (left) list
     int dropIndex = -1;    // where a dragged sound would go
     int fileTarget = -1;   // the instrument dropped files would go to
 
@@ -1003,6 +1217,11 @@ private:
             owner->sounds.deselectAllRows();
             owner->update();
         }
+        void listBoxItemClicked (int, const juce::MouseEvent&) override
+        {
+            owner->inFolders = true;
+            owner->repaint();
+        }
     } instrumentModel;
 
     // Right: the selected instrument's sounds. Click = listen.
@@ -1041,6 +1260,8 @@ private:
         const auto& list = processor.getLibrary().samples (instrument());
         if (! juce::isPositiveAndBelow (row, (int) list.size()))
             return;
+        inFolders = false;
+        repaint();
         if (e.mods.isPopupMenu())
         {
             showSoundMenu (row);
@@ -1107,26 +1328,195 @@ private:
 // --- Drum Rack (rebuild) ---------------------------------------------------
 
 // One row per instrument: how its hits pick their sound, which sound.
+// A Drum Rack row's sound: its waveform and how long it plays (the orange
+// handle; what is after it is cut, with a short fade). Drag the handle (or
+// anywhere on the waveform); double-click = all of it again; click = hear it
+// as it plays now.
+class SoundLengthView : public juce::Component,
+                        public juce::SettableTooltipClient
+{
+public:
+    SoundLengthView (DrumRebuilderProcessor& p, drb::Instrument i) : processor (p), instrument (i)
+    {
+        setTooltip ("How long this sound plays at every hit: drag the orange line. Double-click: all of it");
+    }
+
+    void update()
+    {
+        auto s = processor.getRowSound (instrument);
+        const bool changed = (s == nullptr) != (sound == nullptr)
+                             || (s != nullptr && (s->file != sound->file || s->audio.getNumSamples() != sound->audio.getNumSamples()));
+        sound = std::move (s);
+        if (changed)
+            buildPeaks();
+        if (! dragging)
+            length = processor.getSoundLength (instrument);
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto r = getLocalBounds().toFloat();
+        g.setColour (theme::background);
+        g.fillRoundedRectangle (r, 4.0f);
+        if (sound == nullptr || peaks.empty())
+        {
+            g.setColour (theme::textDim);
+            g.setFont (juce::FontOptions (12.0f));
+            g.drawText ("no sound", r, juce::Justification::centred);
+            return;
+        }
+        const float x0 = r.getX() + 2.0f, w = r.getWidth() - 4.0f, mid = r.getCentreY(), half = r.getHeight() * 0.45f;
+        const float cutX = lengthX();
+        const auto colour = theme::instrument (instrument);
+        for (size_t k = 0; k < peaks.size(); ++k)
+        {
+            const float x = x0 + w * (float) k / (float) peaks.size();
+            g.setColour (x > cutX ? colour.withAlpha (0.18f) : colour.withAlpha (0.9f));
+            g.drawVerticalLine ((int) x, mid - peaks[k] * half, mid + peaks[k] * half + 1.0f);
+        }
+        if (length > 0.0)
+        {
+            g.setColour (juce::Colours::black.withAlpha (0.35f));
+            g.fillRect (juce::Rectangle<float> (cutX, r.getY(), r.getRight() - cutX, r.getHeight()));
+        }
+        // The handle.
+        g.setColour (theme::accent);
+        g.fillRect (juce::Rectangle<float> (cutX - 1.5f, r.getY(), 3.0f, r.getHeight()));
+        g.fillRoundedRectangle (juce::Rectangle<float> (cutX - 5.0f, r.getY(), 10.0f, 8.0f), 2.0f);
+
+        const double full = soundSeconds();
+        const auto text = length > 0.0 && length < full ? juce::String (length, 2) + " s  of  " + juce::String (full, 2) + " s"
+                                                        : juce::String (full, 2) + " s  (all)";
+        g.setFont (juce::FontOptions (11.5f, juce::Font::bold));
+        const float tw = (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), text) + 10.0f;
+        const auto label = juce::Rectangle<float> (r.getRight() - tw - 3.0f, r.getY() + 2.0f, tw, 15.0f);
+        g.setColour (juce::Colours::black.withAlpha (0.6f));
+        g.fillRoundedRectangle (label, 3.0f);
+        g.setColour (juce::Colours::white);
+        g.drawText (text, label, juce::Justification::centred);
+    }
+
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        setMouseCursor (std::abs ((float) e.x - lengthX()) < 8.0f ? juce::MouseCursor::LeftRightResizeCursor
+                                                                  : juce::MouseCursor::PointingHandCursor);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        dragging = sound != nullptr && std::abs ((float) e.x - lengthX()) < 8.0f;
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (sound == nullptr || (! dragging && e.getDistanceFromDragStart() < 3))
+            return;
+        dragging = true;
+        const double full = soundSeconds();
+        const double t = juce::jlimit (0.01, full, full * (e.x - 2.0) / std::max (1.0, getWidth() - 4.0));
+        length = t >= full * 0.995 ? 0.0 : t;
+        repaint();
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (dragging)
+        {
+            dragging = false;
+            processor.setSoundLength (instrument, length);
+        }
+        else
+            listen();
+    }
+
+    void mouseDoubleClick (const juce::MouseEvent&) override
+    {
+        length = 0.0;
+        processor.setSoundLength (instrument, 0.0);
+    }
+
+    // Plays the sound as long as it is set to.
+    void listen()
+    {
+        if (sound == nullptr)
+            return;
+        if (length <= 0.0 || length >= soundSeconds())
+        {
+            processor.previewSample (*sound);
+            return;
+        }
+        drb::Sample cut;
+        cut.sampleRate = sound->sampleRate;
+        const int end = std::max (1, (int) std::ceil (length * sound->sampleRate));
+        cut.audio.makeCopyOf (sound->audio);
+        cut.audio.setSize (sound->audio.getNumChannels(), end, true);
+        const int n = std::min (end, (int) (0.015 * sound->sampleRate));
+        cut.audio.applyGainRamp (end - n, n, 1.0f, 0.0f);
+        processor.previewSample (cut);
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    drb::Instrument instrument;
+    drb::SamplePtr sound;
+    std::vector<float> peaks;
+    double length = 0.0;
+    bool dragging = false;
+
+    double soundSeconds() const { return sound != nullptr ? sound->audio.getNumSamples() / sound->sampleRate : 0.0; }
+
+    float lengthX() const
+    {
+        const double full = soundSeconds();
+        const double l = length > 0.0 && full > 0.0 ? std::min (length, full) : full;
+        return 2.0f + (float) (getWidth() - 4) * (float) (full > 0.0 ? l / full : 1.0);
+    }
+
+    void buildPeaks()
+    {
+        peaks.clear();
+        if (sound == nullptr)
+            return;
+        const int n = 300, total = sound->audio.getNumSamples();
+        float top = 0.0f;
+        for (int k = 0; k < n; ++k)
+        {
+            const int a = (int) ((juce::int64) total * k / n), b = std::max (a + 1, (int) ((juce::int64) total * (k + 1) / n));
+            float m = 0.0f;
+            for (int ch = 0; ch < sound->audio.getNumChannels(); ++ch)
+                m = std::max (m, sound->audio.getMagnitude (ch, a, std::min (b, total) - a));
+            peaks.push_back (m);
+            top = std::max (top, m);
+        }
+        if (top > 0.0f)
+            for (auto& p : peaks)
+                p /= top;
+    }
+};
+
 class RackRow : public juce::Component
 {
 public:
-    RackRow (DrumRebuilderProcessor& p, drb::Instrument i) : processor (p), instrument (i)
+    RackRow (DrumRebuilderProcessor& p, drb::Instrument i) : processor (p), instrument (i), length (p, i)
     {
+        addAndMakeVisible (length);
         for (auto m : drb::allPickModes)
             mode.addItem (drb::pickModeName (m), (int) m + 1);
-        mode.onChange = [this] { processor.setPickMode (instrument, (drb::PickMode) (mode.getSelectedId() - 1)); };
+        mode.onChange = [this]
+        {
+            processor.setPickMode (instrument, (drb::PickMode) (mode.getSelectedId() - 1));
+            keyboardBack();
+        };
         sound.onChange = [this]
         {
             const auto pool = processor.getPool (instrument);
             const int k = sound.getSelectedId() - 1;
             if (juce::isPositiveAndBelow (k, (int) pool.size()))
                 processor.setFixedSample (instrument, pool[(size_t) k]->file);
+            keyboardBack();
         };
-        listen.onClick = [this]
-        {
-            if (auto s = processor.getFixedSample (instrument))
-                processor.previewSample (*s);
-        };
+        listen.onClick = [this] { length.listen(); };
         change.onClick = [this] { processor.setChanging (instrument, change.getToggleState()); };
         change.setTooltip ("Ticked: Next sounds / Right arrow gives this instrument another sound from its folder");
         for (auto* c : std::initializer_list<juce::Component*> { &change, &mode, &sound, &listen })
@@ -1159,7 +1549,8 @@ public:
                 sound.setSelectedId ((int) k + 1, juce::dontSendNotification);
         }
         sound.setEnabled (m == drb::PickMode::Fixed && ! pool.empty());
-        listen.setEnabled (fixed != nullptr);
+        length.update();
+        listen.setEnabled (processor.getRowSound (instrument) != nullptr);
 
         int hits = 0;
         for (const auto& h : processor.getAnalysis().hits)
@@ -1182,30 +1573,44 @@ public:
         g.setColour (theme::instrument (instrument));
         g.fillRect (8, 8, 5, getHeight() - 16);
         g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
-        g.drawText (drb::instrumentName (instrument), 46, 0, 120, getHeight(), juce::Justification::centredLeft);
+        g.drawText (drb::instrumentName (instrument), 46, 8, 120, 30, juce::Justification::centredLeft);
     }
 
     void resized() override
     {
         auto r = getLocalBounds().reduced (8, 7);
-        change.setBounds (r.getX() + 12, r.getY(), 26, r.getHeight());
+        // Right: the sound and its length; left: two lines of controls.
+        length.setBounds (r.removeFromRight (juce::jlimit (160, 420, r.getWidth() * 2 / 5)));
+        r.removeFromRight (10);
+        auto top = r.removeFromTop (30);
+        change.setBounds (top.getX() + 12, top.getY(), 26, top.getHeight());
+        top.removeFromLeft (170);
+        mode.setBounds (top.removeFromLeft (130));
+        top.removeFromLeft (8);
+        listen.setBounds (top.removeFromRight (70));
+        top.removeFromRight (6);
+        sound.setBounds (top);
+        r.removeFromTop (4);
         r.removeFromLeft (170);
-        mode.setBounds (r.removeFromLeft (130));
-        r.removeFromLeft (8);
-        sound.setBounds (r.removeFromLeft (std::min (380, r.getWidth() / 2)));
-        r.removeFromLeft (6);
-        listen.setBounds (r.removeFromLeft (70));
-        r.removeFromLeft (12);
         info.setBounds (r);
     }
 
 private:
+    // After a list closes the keyboard can be left nowhere: the arrows
+    // must still reach the page.
+    void keyboardBack()
+    {
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<juce::Component> (this)]
+                                         { focus::takeBack (safe.getComponent()); });
+    }
+
     DrumRebuilderProcessor& processor;
     drb::Instrument instrument;
     juce::ToggleButton change;
     juce::ComboBox mode, sound;
     juce::TextButton listen { "Listen" };
     juce::Label info;
+    SoundLengthView length;
 };
 
 class DrumRackPage : public juce::Component
@@ -1213,6 +1618,7 @@ class DrumRackPage : public juce::Component
 public:
     explicit DrumRackPage (DrumRebuilderProcessor& p) : processor (p)
     {
+        addMouseListener (this, true);   // a click anywhere here: the arrows work again
         for (auto* b : { &aButton, &bButton })
         {
             b->setClickingTogglesState (false);
@@ -1257,6 +1663,7 @@ public:
         setupLabel (status, theme::textDim, 13.0f);
         setupLabel (hint, theme::textDim, 12.5f);
         hint.setText ("Space / Play plays A or B in a loop over its bars. Left / Right: the sounds before / next sounds for the ticked instruments. "
+                      "Drag the orange line on a sound: how long it plays (double-click: all of it). "
                       "Save the originals and add your own sounds on the Sample Browser tab.",
                       juce::dontSendNotification);
         addAndMakeVisible (status);
@@ -1312,6 +1719,19 @@ public:
 
     void paint (juce::Graphics& g) override { g.fillAll (theme::background); }
 
+    void mouseUp (const juce::MouseEvent&) override { keyboardBack(); }
+    void visibilityChanged() override
+    {
+        if (isShowing())
+            keyboardBack();
+    }
+
+    void keyboardBack()
+    {
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<juce::Component> (this)]
+                                         { focus::takeBack (safe.getComponent()); });
+    }
+
     void resized() override
     {
         auto r = getLocalBounds().reduced (12);
@@ -1337,7 +1757,7 @@ public:
         r.removeFromTop (10);
         for (auto& row : rows)
         {
-            row->setBounds (r.removeFromTop (44));
+            row->setBounds (r.removeFromTop (70));
             r.removeFromTop (6);
         }
     }
@@ -1474,24 +1894,12 @@ private:
 
     void exportMidi()
     {
-        const auto* l = processor.getLoaded();
-        if (l == nullptr)
-            return;
-        const auto suggested = l->file.getParentDirectory().getChildFile (l->file.getFileNameWithoutExtension() + " drums.mid");
-        chooser = std::make_unique<juce::FileChooser> ("Save the drums as MIDI", suggested, "*.mid");
         juce::Component::SafePointer<ExportPage> self (this);
-        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
-                                  | juce::FileBrowserComponent::warnAboutOverwriting,
-                              [self] (const juce::FileChooser& fc)
-                              {
-                                  if (self == nullptr || fc.getResult() == juce::File())
-                                      return;
-                                  auto file = fc.getResult().withFileExtension ("mid");
-                                  const auto& a = self->processor.getAnalysis();
-                                  const bool ok = drb::writeMidiFile (file, a.hits, a.grid);
-                                  self->result.setText (ok ? "Saved " + file.getFileName() : "Could not save " + file.getFullPathName(),
-                                                        juce::dontSendNotification);
-                              });
+        saveDrumsMidi (processor, chooser, [self] (const juce::String& text)
+        {
+            if (self != nullptr)
+                self->result.setText (text, juce::dontSendNotification);
+        });
     }
 };
 
@@ -1583,6 +1991,7 @@ DrumRebuilderEditor::DrumRebuilderEditor (DrumRebuilderProcessor& p)
 
 DrumRebuilderEditor::~DrumRebuilderEditor()
 {
+    openPanel.reset();
     processor.removeChangeListener (this);
     setLookAndFeel (nullptr);
 }
@@ -1602,6 +2011,9 @@ void DrumRebuilderEditor::paint (juce::Graphics& g)
 
 void DrumRebuilderEditor::resized()
 {
+    if (openPanel != nullptr)
+        openPanel->setBounds (getLocalBounds());
+
     auto r = getLocalBounds();
     auto header = r.removeFromTop (headerHeight).reduced (8, 7);
 
@@ -1632,6 +2044,9 @@ void DrumRebuilderEditor::resized()
 
 bool DrumRebuilderEditor::keyPressed (const juce::KeyPress& key)
 {
+    if (openPanel != nullptr)   // the Open panel's keys stay there
+        return false;
+
     const bool onImport = tabs.getCurrentContentComponent() == importPage;
     const bool onMidi = tabs.getCurrentContentComponent() == midiPage;
     auto& waveform = tabs.getCurrentContentComponent() == instrumentsPage ? instrumentsPage->getWaveform()
@@ -1649,6 +2064,10 @@ bool DrumRebuilderEditor::keyPressed (const juce::KeyPress& key)
             return false;
         return true;
     }
+
+    // Escape: the selected labels on the Instruments tab are let go.
+    if (key == juce::KeyPress::escapeKey && tabs.getCurrentContentComponent() == instrumentsPage)
+        return instrumentsPage->getWaveform().clearSelection();
 
     if (key == juce::KeyPress::spaceKey)
     {
@@ -1670,6 +2089,10 @@ bool DrumRebuilderEditor::keyPressed (const juce::KeyPress& key)
         return true;
     }
 
+    // Sample Browser: the arrows go through the folders and their sounds.
+    if (tabs.getCurrentContentComponent() == samplePage && samplePage->arrowKey (key))
+        return true;
+
     // Drum Rack: left / right = the sounds before / next sounds.
     if (tabs.getCurrentContentComponent() == rackPage
         && (key == juce::KeyPress::leftKey || key == juce::KeyPress::rightKey))
@@ -1686,14 +2109,6 @@ bool DrumRebuilderEditor::keyPressed (const juce::KeyPress& key)
         && (key == juce::KeyPress::leftKey || key == juce::KeyPress::rightKey))
     {
         waveform.jumpToHit (key == juce::KeyPress::leftKey ? -1 : 1);
-        return true;
-    }
-
-    // Sample Browser: up / down = the sound above / below, and it plays.
-    if (tabs.getCurrentContentComponent() == samplePage
-        && (key == juce::KeyPress::upKey || key == juce::KeyPress::downKey))
-    {
-        samplePage->step (key == juce::KeyPress::upKey ? -1 : 1);
         return true;
     }
 
@@ -1725,18 +2140,22 @@ void DrumRebuilderEditor::filesDropped (const juce::StringArray& files, int, int
         processor.loadFile (juce::File (files[0]));
 }
 
+// Our own Open panel instead of the system dialog, which can't play a file
+// before opening it.
 void DrumRebuilderEditor::openFileChooser()
 {
-    const auto start = processor.getLoaded() != nullptr ? processor.getLoaded()->file.getParentDirectory()
-                                                        : juce::File::getSpecialLocation (juce::File::userMusicDirectory);
-    chooser = std::make_unique<juce::FileChooser> ("Open a drums-only recording", start, drb::supportedWildcard());
-    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                          [this] (const juce::FileChooser& fc)
-                          {
-                              const auto file = fc.getResult();
-                              if (file.existsAsFile())
-                                  processor.loadFile (file);
-                          });
+    if (openPanel == nullptr)
+    {
+        openPanel = std::make_unique<OpenPanel> (processor);
+        openPanel->onClose = [this]
+        {
+            openPanel.reset();   // stops the preview
+            focus::takeBack (this);
+        };
+        addAndMakeVisible (*openPanel);
+        openPanel->setBounds (getLocalBounds());
+    }
+    openPanel->grabKeyboardFocus();
 }
 
 void DrumRebuilderEditor::togglePlay()
