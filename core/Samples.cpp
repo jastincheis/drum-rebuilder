@@ -91,6 +91,18 @@ void SampleLibrary::rescan()
 
         auto files = folder.findChildFiles (juce::File::findFiles, false, supportedWildcard());
         files.sort();
+
+        // The user's order first, then the rest by name.
+        const auto order = juce::StringArray::fromLines (folder.getChildFile (orderFileName()).loadFileAsString());
+        std::stable_sort (files.begin(), files.end(), [&] (const juce::File& a, const juce::File& b)
+        {
+            auto rank = [&] (const juce::File& f)
+            {
+                const int i = order.indexOf (f.getFileName());
+                return i < 0 ? order.size() : i;
+            };
+            return rank (a) < rank (b);
+        });
         for (const auto& f : files)
         {
             juce::String error;
@@ -148,6 +160,28 @@ int SampleLibrary::saveOriginals (const juce::String& beatName, const juce::Audi
 
     rescan();
     return written;
+}
+
+void SampleLibrary::moveSample (Instrument inst, int from, int to)
+{
+    auto& list = lists[(size_t) inst];
+    if (! juce::isPositiveAndBelow (from, (int) list.size()))
+        return;
+    to = juce::jlimit (0, (int) list.size() - 1, to);
+    if (from == to)
+        return;
+    auto s = list[(size_t) from];
+    list.erase (list.begin() + from);
+    list.insert (list.begin() + to, std::move (s));
+    saveOrder (inst);
+}
+
+void SampleLibrary::saveOrder (Instrument inst) const
+{
+    juce::StringArray names;
+    for (const auto& s : lists[(size_t) inst])
+        names.add (s->file.getFileName());
+    folderFor (inst).getChildFile (orderFileName()).replaceWithText (names.joinIntoString ("\n") + "\n");
 }
 
 int SampleLibrary::addFiles (Instrument instrument, const juce::Array<juce::File>& files)

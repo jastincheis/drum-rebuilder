@@ -289,6 +289,31 @@ void checkRebuild()
                  && saved[0]->fromBeat == "Test beat"
                  && saved[0]->file.getFileName() == "Test beat (original) 01.wav";
     check (ok, "original hits saved into the instrument folders, saving again replaces them");
+
+    // 5. The user's order: the last one put first, kept after reading the
+    // folders again; a new sound comes after the ordered ones.
+    {
+        const auto names = [] (const SampleLibrary& lib)
+        {
+            juce::StringArray n;
+            for (const auto& smp : lib.samples (Instrument::Kick))
+                n.add (smp->file.getFileName());
+            return n;
+        };
+        const int count = (int) library.samples (Instrument::Kick).size();
+        const auto last = library.samples (Instrument::Kick).back()->file.getFileName();
+        library.moveSample (Instrument::Kick, count - 1, 0);
+        SampleLibrary again (root);
+        again.rescan();
+        juce::AudioBuffer<float> click (1, 2000);
+        click.clear();
+        click.setSample (0, 10, 0.9f);
+        writeWav (again.folderFor (Instrument::Kick).getChildFile ("A new kick.wav"), click, sr);
+        again.rescan();
+        const auto order = names (again);
+        check (count >= 2 && order[0] == last && order[order.size() - 1] == "A new kick.wav",
+               "the sounds' order is kept, a new sound comes last");
+    }
     root.deleteRecursively();
 }
 
@@ -573,6 +598,27 @@ void checkHitGains()
     check (hasHitGains (hits), "a moved hit is a change");
     const auto moved = applyHitGains (bands, hits);
     check (tone (moved, 60.0, 0.52) < 0.05 * kick1, "a moved kick is gone from where it was");
+
+    // A kick (60 Hz) and a snare (1 kHz body, 9 kHz wires) struck together.
+    juce::AudioBuffer<float> ks (1, (int) sr);
+    for (int i = 0; i < ks.getNumSamples(); ++i)
+    {
+        const double t = i / sr, w = 2.0 * juce::MathConstants<double>::pi * t;
+        const float env = t >= 0.5 ? (float) std::exp (-(t - 0.5) * 8.0) : 0.0f;
+        ks.setSample (0, i, env * (0.3f * (float) std::sin (w * 60.0) + 0.3f * (float) std::sin (w * 1000.0)
+                                   + 0.3f * (float) std::sin (w * 9000.0)));
+    }
+    const auto ksBands = splitBands (ks, sr);
+    hits = { { 0.5, Instrument::Kick, 0.8f, 1.0f, true }, { 0.5, Instrument::Snare, 0.8f, 1.0f, true } };
+    InstrumentGains onlySnare {};
+    onlySnare[(size_t) Instrument::Snare] = 1.0f;
+    const auto ksKick = applyHitGains (ksBands, hits, &onlyKick), ksSnare = applyHitGains (ksBands, hits, &onlySnare);
+    check (tone (ksKick, 60.0, 0.52) > 0.9 * tone (ks, 60.0, 0.52) && tone (ksKick, 1000.0, 0.52) < 0.1 * tone (ks, 1000.0, 0.52)
+               && tone (ksKick, 9000.0, 0.52) < 0.1 * tone (ks, 9000.0, 0.52),
+           "solo kick on a kick + snare: no snare");
+    check (tone (ksSnare, 60.0, 0.52) < 0.1 * tone (ks, 60.0, 0.52) && tone (ksSnare, 1000.0, 0.52) > 0.9 * tone (ks, 1000.0, 0.52)
+               && tone (ksSnare, 9000.0, 0.52) > 0.9 * tone (ks, 9000.0, 0.52),
+           "solo snare on a kick + snare: no kick");
 }
 
 // A marker put by hand lands on the start of the sound near it.

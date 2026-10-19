@@ -119,9 +119,20 @@ juce::Rectangle<int> MidiEditorView::soloButton (int lane) const
     return { headerWidth - 50, r.getCentreY() - 12, 42, 24 };
 }
 
-// On a hit's top or bottom edge: dragging there sets how hard it is hit.
+// The volume flag on top of a hit: drag it up / down.
+juce::Rectangle<float> MidiEditorView::volumeFlag (int index) const
+{
+    const auto box = hitBox (index);
+    const float top = (float) laneBounds (laneOf (processor.getAnalysis().hits[(size_t) index].instrument)).getY() + 2.0f;
+    return { box.getCentreX() - 7.0f, std::max (top, box.getY() - 16.0f), 14.0f, 12.0f };
+}
+
+// On a hit's volume flag, or its top or bottom edge: dragging there sets how
+// loud it is.
 bool MidiEditorView::onVelocityEdge (int index, juce::Point<int> p) const
 {
+    if (volumeFlag (index).expanded (4.0f).contains (p.toFloat()))
+        return true;
     const auto box = hitBox (index);
     return std::abs ((float) p.y - box.getY()) <= 5.0f || std::abs ((float) p.y - box.getBottom()) <= 5.0f;
 }
@@ -288,6 +299,21 @@ void MidiEditorView::paint (juce::Graphics& g)
         const bool muted = anySolo && ! processor.isSolo (h.instrument);
         g.setColour (colour.withAlpha (muted ? 0.15f : 0.45f + 0.55f * h.velocity));
         g.fillRoundedRectangle (box, 2.0f);
+
+        // Its volume flag: a little tab on a stem.
+        const auto flag = volumeFlag ((int) i);
+        const bool active = (int) i == hoverHit || (int) i == selected || (int) i == dragHit;
+        g.setColour (colour.withAlpha (muted ? 0.2f : 1.0f));
+        g.drawVerticalLine ((int) box.getCentreX(), flag.getBottom(), box.getY());
+        g.fillRoundedRectangle (flag, 3.0f);
+        if (active)
+        {
+            g.setColour (juce::Colours::white);
+            g.drawRoundedRectangle (flag.expanded (1.0f), 3.0f, 1.5f);
+        }
+        g.setColour (juce::Colours::black.withAlpha (0.6f));
+        for (int k = 0; k < 2; ++k)   // grip lines
+            g.drawHorizontalLine ((int) flag.getY() + 4 + 3 * k, flag.getX() + 3.0f, flag.getRight() - 3.0f);
         if ((int) i == selected)
         {
             g.setColour (juce::Colours::white);
@@ -368,6 +394,8 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
         selected = dragHit = hit;
         dragOffset = xToSeconds ((float) e.x) - processor.getAnalysis().hits[(size_t) hit].time;
         velocityDrag = onVelocityEdge (hit, e.getPosition());
+        velocityAtStart = processor.getAnalysis().hits[(size_t) hit].velocity;
+        grabbedAbove = (float) e.y < hitBox (hit).getCentreY();
     }
     else if (const int lane = laneAt (e.y); lane >= 0 && e.x >= laneArea().getX() && e.getNumberOfClicks() == 1)
     {
@@ -400,10 +428,12 @@ void MidiEditorView::mouseDrag (const juce::MouseEvent& e)
             hitPreviewing = true;
             processor.startHitPreview (dragHit);
         }
-        // The bar's half-height from the row's middle sets it.
+        // Away from the row's middle = louder: the bar's edge follows the
+        // mouse from where it was grabbed (the flag too). Shift = finer.
         const auto r = laneBounds (laneOf (processor.getAnalysis().hits[(size_t) dragHit].instrument));
-        const float half = std::abs ((float) e.y - (float) r.getCentreY());
-        processor.setHitVelocity (dragHit, juce::jlimit (0.05f, 1.0f, (2.0f * half / (float) r.getHeight() - 0.25f) / 0.6f), false);
+        const float moved = (float) (grabbedAbove ? -e.getDistanceFromDragStartY() : e.getDistanceFromDragStartY());
+        const float perPixel = 1.0f / (0.3f * (float) r.getHeight()) * (e.mods.isShiftDown() ? 0.25f : 1.0f);
+        processor.setHitVelocity (dragHit, juce::jlimit (0.05f, 1.0f, velocityAtStart + moved * perPixel), false);
         repaint();
         return;
     }

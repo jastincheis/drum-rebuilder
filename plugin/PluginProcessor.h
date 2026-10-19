@@ -89,6 +89,12 @@ public:
     void deleteHitAt (int hitIndex);
     int addHitAt (double seconds, drb::Instrument, float velocity);  // returns its index
     void setHitVelocity (int hitIndex, float velocity, bool undoStep = true);
+    // The hits' changes made by hand (loudness, hits added, moved) are heard
+    // only where they are made, in the MIDI editor; elsewhere the recording
+    // plays as it was. Solo follows the same.
+    void setEditsAudible (bool);
+    bool areEditsAudible() const { return editsAudible; }
+
     // How loud one hit sounds: the peak of its sound, in dBFS (-100 = silent).
     float getHitLevelDb (int hitIndex) const;
     // While a hit's loudness is being dragged: it plays in a loop, and
@@ -163,6 +169,7 @@ public:
 
     drb::SampleLibrary& getLibrary() { return library; }
     void rescanLibrary();
+    void moveSample (drb::Instrument, int from, int to);   // the user's order in the library
     juce::String getBeatName() const;   // the recording's file name, for its originals
     // Cuts every hit of this beat between its IN and OUT into the
     // instrument folders. Returns how many sounds were written.
@@ -175,7 +182,14 @@ public:
     void setPickMode (drb::Instrument, drb::PickMode);
     drb::SamplePtr getFixedSample (drb::Instrument) const;   // null = none
     void setFixedSample (drb::Instrument, const juce::File&);
-    void nextSounds();   // other sounds, at random, for every instrument not on Original
+    // Which instruments Next sounds changes (all at first).
+    bool getChanging (drb::Instrument i) const { return changing[(size_t) i]; }
+    void setChanging (drb::Instrument, bool);
+    // Forward: the next sounds already heard, else new ones at random for
+    // the ticked instruments. Back: the sounds before.
+    void nextSounds();
+    void previousSounds();
+    bool canGoBack() const;
 
     bool getKeepPitch() const { return keepPitch; }
     void setKeepPitch (bool);
@@ -187,6 +201,10 @@ public:
     bool isListeningRebuilt() const { return listenRebuilt; }
     void setListeningRebuilt (bool);
     bool isRendering() const { return rendering; }
+    // Drum Rack: the beat goes round and round over its whole bars, so
+    // the sounds can be changed while it plays. Off = the loop as before.
+    void setBarLoop (bool);
+    bool isBarLoop() const { return barLoop; }
 
     // The rebuilt beat as a stereo 24-bit WAV at the recording's sample
     // rate, with the last sounds' tails. Done in the background.
@@ -207,6 +225,19 @@ private:
     drb::SampleLibrary library { drb::SampleLibrary::defaultRoot() };
     std::array<drb::PickMode, drb::numInstruments> pickModes {};
     std::array<juce::File, drb::numInstruments> fixedFiles;
+    std::array<bool, drb::numInstruments> changing = [] { std::array<bool, drb::numInstruments> a; a.fill (true); return a; }();
+    struct SoundSet
+    {
+        std::array<drb::PickMode, drb::numInstruments> modes;
+        std::array<juce::File, drb::numInstruments> files;
+        juce::uint32 seed;
+        bool operator== (const SoundSet& o) const { return modes == o.modes && files == o.files && seed == o.seed; }
+    };
+    std::vector<SoundSet> soundHistory;   // what Next / Previous step through
+    size_t soundPos = 0;
+    SoundSet currentSounds() const { return { pickModes, fixedFiles, seed }; }
+    void applySounds (const SoundSet&);
+    void rememberSounds();   // the sounds now, at soundPos, if they changed by hand
     bool keepPitch = false, listenRebuilt = false, rendering = false;
     double tempoFactor = 1.0;
     juce::uint32 seed = 1;
@@ -228,9 +259,13 @@ private:
     void showSource (double previousFactor);   // puts the original or the rebuilt beat in the player
     double timelineFactor() const { return listenRebuilt && rebuiltAtDevice != nullptr ? tempoFactor : 1.0; }
     void applyLoop();
+    bool barLoop = false, loopingBeforeBarLoop = false;
+    juce::Range<double> barRange() const;   // bar 1 to the end of the last bar, recording seconds
     // The recording as it plays (A): each hit's stretch louder or softer
     // as its loudness was changed by hand.
     std::unique_ptr<juce::AudioBuffer<float>> originalWithGains() const;
+    bool editsAudible = false;
+    std::vector<drb::Hit> audibleHits() const;   // the hits as they sound now (edits or not)
     void addHandHits (juce::AudioBuffer<float>&, const drb::InstrumentGains* only) const;
     int originalGeneration = 0;
     mutable std::unique_ptr<drb::Bands> bands;   // the recording at the device rate, split; made when first needed

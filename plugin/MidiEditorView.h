@@ -6,7 +6,7 @@
 
 // The hits as MIDI: one row per instrument over the bar / beat grid. Click an
 // empty spot = add a hit, drag = move it (onto another row = change the
-// instrument, Alt = off the grid), drag its top or bottom = how loud it is
+// instrument, Alt = off the grid), drag its flag (or top / bottom) = how loud it is
 // (it plays in a loop meanwhile, the dB shown by it), double-click or
 // Delete = remove it, right-click = more. Solo on a row = hear only it
 // (Ctrl / Shift: one more). Wheel = zoom, shift + wheel = move along.
@@ -52,7 +52,9 @@ private:
     double dragOffset = 0.0;  // seconds between the mouse and the hit
     double lastPlayhead = -1.0;
     int hoverHit = -1;
-    bool hitPreviewing = false;   // a hit's bar loops while its loudness is dragged
+    bool hitPreviewing = false;
+    float velocityAtStart = 0.0f;
+    bool grabbedAbove = true;   // velocity drag: by the top (flag) or the bottom   // a hit's bar loops while its loudness is dragged
 
     std::vector<drb::Instrument> lanes;   // rows, top to bottom
     int numLanes() const { return (int) lanes.size(); }
@@ -69,6 +71,7 @@ private:
     juce::Rectangle<float> hitBox (int index) const;
     juce::Rectangle<int> soloButton (int lane) const;
     bool onVelocityEdge (int index, juce::Point<int>) const;
+    juce::Rectangle<float> volumeFlag (int index) const;
     void setView (double start, double end);
     void showHitMenu (int hit);
 

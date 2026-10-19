@@ -16,24 +16,31 @@ constexpr double rampSeconds = 0.003;
 
 enum Band { lowBand, midBand, highBand };
 
-// Which bands an instrument's sound is mostly in.
-std::array<bool, 3> bandsOf (Instrument i)
+// How much of an instrument's sound is in each band (lows, mids, highs).
+std::array<float, 3> weightsOf (Instrument i)
 {
     switch (i)
     {
-        case Instrument::Kick:   return { true, false, false };
+        case Instrument::Kick:    return { 1.0f, 0.5f, 0.2f };   // body, click
         case Instrument::TomLow:
         case Instrument::TomMid:
-        case Instrument::TomHigh: return { true, true, false };
+        case Instrument::TomHigh: return { 1.0f, 0.9f, 0.2f };
         case Instrument::Snare:
         case Instrument::Clap:
-        case Instrument::Rimshot: return { false, true, false };
+        case Instrument::Rimshot: return { 0.3f, 1.0f, 0.7f };   // body, wires
         case Instrument::HiHatClosed:
-        case Instrument::HiHatOpen:
+        case Instrument::HiHatOpen: return { 0.0f, 0.1f, 1.0f };
         case Instrument::Crash:
-        case Instrument::Ride:   return { false, false, true };
+        case Instrument::Ride:    return { 0.0f, 0.3f, 1.0f };
     }
-    return { true, true, true };
+    return { 1.0f, 1.0f, 1.0f };
+}
+
+// The bands an instrument's sound is mostly in.
+std::array<bool, 3> bandsOf (Instrument i)
+{
+    const auto w = weightsOf (i);
+    return { w[0] >= 0.5f, w[1] >= 0.5f, w[2] >= 0.5f };
 }
 
 // Linkwitz-Riley (two Butterworths): low + high add up flat.
@@ -66,11 +73,12 @@ struct Moment
 };
 
 // The hits grouped into moments played together, each with its band gains:
-// a band follows the hits that own it, or, when none is there, the loudest
-// change of the moment. The lows are the exception: with no kick or tom
-// there they are the last one still ringing, so they keep its gain. Hits
-// added by hand have no sound of their own in the recording and are left
-// out; a moved hit's sound is taken out where it was.
+// a band follows the hit whose sound is most in it (kick + snare: the lows
+// follow the kick, the mids and highs the snare). The lows are the
+// exception: with no kick or tom there they are the last one still
+// ringing, so they keep its gain. Hits added by hand have no sound of their
+// own in the recording and are left out; a moved hit's sound is taken out
+// where it was.
 std::vector<Moment> moments (const std::vector<Hit>& hits, const InstrumentGains* instrumentGains)
 {
     std::vector<Entry> entries;
@@ -95,20 +103,23 @@ std::vector<Moment> moments (const std::vector<Hit>& hits, const InstrumentGains
     float lowCarry = -1.0f;
     for (auto& m : out)
     {
-        float any = 0.0f;
-        std::array<float, 3> owned { -1.0f, -1.0f, -1.0f };
-        for (const auto& e : m.entries)
-        {
-            any = std::max (any, e.gain);
-            const auto bands = bandsOf (e.instrument);
-            for (int b = 0; b < 3; ++b)
-                if (bands[(size_t) b])
-                    owned[(size_t) b] = std::max (owned[(size_t) b], e.gain);
-        }
         for (int b = 0; b < 3; ++b)
-            m.gain[(size_t) b] = owned[(size_t) b] >= 0.0f ? owned[(size_t) b] : any;
-        if (owned[lowBand] < 0.0f && lowCarry >= 0.0f)
-            m.gain[lowBand] = lowCarry;
+        {
+            // The strongest in this band; equally strong: the louder change.
+            float weight = -1.0f, gain = 1.0f;
+            for (const auto& e : m.entries)
+            {
+                const float w = weightsOf (e.instrument)[(size_t) b];
+                if (w > weight + 1.0e-6f || (std::abs (w - weight) <= 1.0e-6f && e.gain > gain))
+                {
+                    weight = w;
+                    gain = e.gain;
+                }
+            }
+            m.gain[(size_t) b] = gain;
+            if (b == lowBand && weight < 0.5f && lowCarry >= 0.0f)
+                m.gain[(size_t) b] = lowCarry;
+        }
         lowCarry = m.gain[lowBand];
     }
     return out;

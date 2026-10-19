@@ -64,10 +64,17 @@ public:
     // adds " 2", " 3" ... on a clash). Returns how many were copied; rescans.
     int addFiles (Instrument, const juce::Array<juce::File>&);
 
+    // The user's order of an instrument's sounds: moves one from position
+    // `from` to `to` and remembers it (order.txt in the folder; sounds not
+    // in it, e.g. new ones, come after, by name).
+    void moveSample (Instrument, int from, int to);
+
     static juce::String originalsTag() { return " (original) "; }
+    static juce::String orderFileName() { return "order.txt"; }
 
 private:
     juce::File root;
+    void saveOrder (Instrument) const;
     std::array<std::vector<SamplePtr>, numInstruments> lists;
 };
 
