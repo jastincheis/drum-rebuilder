@@ -193,4 +193,40 @@ std::vector<Onset> pickOnsets (const OnsetFunction& of, const std::vector<float>
     return onsets;
 }
 
+double findAttack (const juce::AudioBuffer<float>& audio, double sampleRate, double around, double window, float minRise)
+{
+    const int n = audio.getNumSamples();
+    const int frame = std::max (1, (int) (sampleRate / 1000.0));   // 1 ms
+    const float peak = audio.getMagnitude (0, n);
+    if (peak <= 0.0f)
+        return -1.0;
+
+    // Peak level per millisecond, from a little before the window on.
+    const int first = std::max (0, (int) ((around - window) * sampleRate) / frame - 3);
+    const int last = std::min ((n - 1) / frame, (int) ((around + window) * sampleRate) / frame + 1);
+    if (last <= first)
+        return -1.0;
+    std::vector<float> level ((size_t) (last - first + 1));
+    for (int k = first; k <= last; ++k)
+        level[(size_t) (k - first)] = audio.getMagnitude (k * frame, std::min (frame, n - k * frame));
+
+    auto at = [&] (int k) { return k < first ? 0.0f : level[(size_t) (k - first)]; };
+    int best = -1;
+    float bestRise = minRise * peak;
+    for (int k = std::max (first, (int) ((around - window) * sampleRate) / frame); k < last; ++k)
+    {
+        // Before the file starts there is silence, so a sound at 0 is found too.
+        const float before = k == 0 ? 0.0f : std::max ({ at (k - 1), at (k - 2), at (k - 3) });
+        const float rise = std::max (at (k), at (k + 1)) - before;
+        if (rise > bestRise)
+        {
+            bestRise = rise;
+            best = k;
+        }
+    }
+    if (best < 0)
+        return -1.0;
+    return std::max (0.0, best * frame / sampleRate - 0.001);
+}
+
 } // namespace drb

@@ -749,14 +749,15 @@ void WaveformView::showMenu (const juce::MouseEvent& e)
     }
     else
     {
-        juce::PopupMenu add;
+        // A sound the analysis missed: a marker here, on the sound's start.
+        menu.addSectionHeader ("Add a marker here - it is a:");
         for (auto inst : choices)
-            add.addItem (drb::instrumentName (inst), [this, self, t, inst]
+            menu.addItem (drb::instrumentName (inst), [this, self, t, inst]
             {
                 if (self != nullptr)
                     processor.addHit (t, inst);
             });
-        menu.addSubMenu ("Add a hit here", add);
+        menu.addSeparator();
         if (hasTempo)
             menu.addItem ("Bar 1 starts here", [this, self, t]
             {

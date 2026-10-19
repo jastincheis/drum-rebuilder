@@ -6,9 +6,10 @@
 
 // The hits as MIDI: one row per instrument over the bar / beat grid. Click an
 // empty spot = add a hit, drag = move it (onto another row = change the
-// instrument, Alt = off the grid), drag its top or bottom = how hard it is
-// hit, double-click or Delete = remove it, right-click = more. S on a row =
-// solo. Wheel = zoom, shift + wheel = move along.
+// instrument, Alt = off the grid), drag its top or bottom = how loud it is
+// (it plays in a loop meanwhile, the dB shown by it), double-click or
+// Delete = remove it, right-click = more. Solo on a row = hear only it
+// (Ctrl / Shift: one more). Wheel = zoom, shift + wheel = move along.
 class MidiEditorView : public juce::Component,
                        private juce::Timer,
                        private juce::ScrollBar::Listener
@@ -31,6 +32,7 @@ public:
     void mouseDrag (const juce::MouseEvent&) override;
     void mouseUp (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
     bool keyPressed (const juce::KeyPress&) override;
@@ -49,6 +51,8 @@ private:
     bool dragMoved = false, justAdded = false, velocityDrag = false;
     double dragOffset = 0.0;  // seconds between the mouse and the hit
     double lastPlayhead = -1.0;
+    int hoverHit = -1;
+    bool hitPreviewing = false;   // a hit's bar loops while its loudness is dragged
 
     std::vector<drb::Instrument> lanes;   // rows, top to bottom
     int numLanes() const { return (int) lanes.size(); }

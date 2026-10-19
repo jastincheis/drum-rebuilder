@@ -8,6 +8,8 @@
 #include "AudioFile.h"
 #include "Metronome.h"
 #include "Midi.h"
+#include "HitGains.h"
+#include "Onsets.h"
 #include "Rebuild.h"
 #include "Samples.h"
 #include "Player.h"
@@ -495,6 +497,103 @@ int analyseFile (const juce::File& file)
     return 0;
 }
 
+// One hit made softer in a recording where a kick (60 Hz) and a hi-hat
+// (9 kHz) are struck 1 ms apart: only its own band comes down.
+void checkHitGains()
+{
+    const double sr = 48000.0;
+    juce::AudioBuffer<float> audio (1, (int) sr);
+    for (int i = 0; i < audio.getNumSamples(); ++i)
+    {
+        const double t = i / sr;
+        const float env = t >= 0.5 ? (float) std::exp (-(t - 0.5) * 8.0) : 0.0f;
+        audio.setSample (0, i, env * (0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 60.0 * t)
+                                      + 0.4f * (float) std::sin (2.0 * juce::MathConstants<double>::pi * 9000.0 * t)));
+    }
+    std::vector<Hit> hits { { 0.5, Instrument::Kick, 0.8f, 1.0f, true }, { 0.501, Instrument::HiHatClosed, 0.8f, 1.0f, true } };
+    const auto bands = splitBands (audio, sr);
+    check (! hasHitGains (hits), "no loudness changes = none to apply");
+
+    auto band = [&] (const juce::AudioBuffer<float>& b, double hz)
+    {
+        // The level of one tone, 50 ms after the hits (Goertzel-like).
+        double re = 0.0, im = 0.0;
+        const int a = (int) (0.55 * sr), n = (int) (0.05 * sr);
+        for (int i = a; i < a + n; ++i)
+        {
+            const double w = 2.0 * juce::MathConstants<double>::pi * hz * i / sr;
+            re += b.getSample (0, i) * std::cos (w);
+            im += b.getSample (0, i) * std::sin (w);
+        }
+        return std::sqrt (re * re + im * im);
+    };
+    const double kickBefore = band (audio, 60.0), hatBefore = band (audio, 9000.0);
+    const float levelBefore = hitLevelDb (bands, hits, 0);
+    hits[0].soundVelocity = hits[0].velocity;
+    hits[0].velocity *= 0.5f;
+    check (hasHitGains (hits), "a softer hit is a change");
+    const auto out = applyHitGains (bands, hits);
+    const double kick = band (out, 60.0) / kickBefore, hat = band (out, 9000.0) / hatBefore;
+    check (std::abs (kick - 0.5) < 0.05 && std::abs (hat - 1.0) < 0.05,
+           "softer kick played with a hi-hat: the kick comes down, the hi-hat stays");
+    check (std::abs (hitLevelDb (bands, hits, 0) - (levelBefore - 6.02f)) < 0.2f, "the hit's level shows the change");
+
+    // Solo: a kick + hi-hat at 0.5 s, the kick still ringing at a lone
+    // hi-hat at 0.6 s.
+    hits = { { 0.5, Instrument::Kick, 0.8f, 1.0f, true }, { 0.501, Instrument::HiHatClosed, 0.8f, 1.0f, true },
+             { 0.6, Instrument::HiHatClosed, 0.8f, 1.0f, true } };
+    InstrumentGains onlyKick {}, onlyHat {};
+    onlyKick[(size_t) Instrument::Kick] = 1.0f;
+    onlyHat[(size_t) Instrument::HiHatClosed] = 1.0f;
+    const auto kickSolo = applyHitGains (bands, hits, &onlyKick), hatSolo = applyHitGains (bands, hits, &onlyHat);
+    auto tone = [&] (const juce::AudioBuffer<float>& b, double hz, double from)
+    {
+        double re = 0.0, im = 0.0;
+        for (int i = (int) (from * sr); i < (int) ((from + 0.04) * sr); ++i)
+        {
+            const double w = 2.0 * juce::MathConstants<double>::pi * hz * i / sr;
+            re += b.getSample (0, i) * std::cos (w);
+            im += b.getSample (0, i) * std::sin (w);
+        }
+        return std::sqrt (re * re + im * im);
+    };
+    const double kick1 = tone (audio, 60.0, 0.52), hat1 = tone (audio, 9000.0, 0.52);
+    const double kick2 = tone (audio, 60.0, 0.65), hat2 = tone (audio, 9000.0, 0.65);
+    // (The bands overlap a little at their edges: a few % leak through.)
+    check (tone (kickSolo, 60.0, 0.52) > 0.9 * kick1 && tone (kickSolo, 9000.0, 0.52) < 0.1 * hat1
+               && tone (kickSolo, 60.0, 0.65) > 0.9 * kick2 && tone (kickSolo, 9000.0, 0.65) < 0.1 * hat2,
+           "solo kick: the kick (also ringing on), no hi-hats");
+    check (tone (hatSolo, 9000.0, 0.52) > 0.9 * hat1 && tone (hatSolo, 60.0, 0.52) < 0.1 * kick1
+               && tone (hatSolo, 9000.0, 0.65) > 0.9 * hat2 && tone (hatSolo, 60.0, 0.65) < 0.1 * kick2,
+           "solo hi-hat: the hi-hats, no kick");
+
+    // A kick moved away by hand: its old place no longer sounds.
+    hits = { { 0.7, Instrument::Kick, 0.8f, 1.0f, true } };
+    hits[0].source = 0.5;
+    check (hasHitGains (hits), "a moved hit is a change");
+    const auto moved = applyHitGains (bands, hits);
+    check (tone (moved, 60.0, 0.52) < 0.05 * kick1, "a moved kick is gone from where it was");
+}
+
+// A marker put by hand lands on the start of the sound near it.
+void checkFindAttack()
+{
+    const double sr = 48000.0;
+    juce::AudioBuffer<float> audio (1, (int) sr);
+    audio.clear();
+    auto burst = [&] (double at)
+    {
+        for (int i = (int) (at * sr); i < (int) ((at + 0.1) * sr); ++i)
+            audio.setSample (0, i, 0.8f * (float) std::exp (-(i / sr - at) * 30.0) * (float) std::sin (i * 0.05));
+    };
+    burst (0.0);
+    burst (0.5);
+    const double atStart = findAttack (audio, sr, 0.02, 0.04), atMiddle = findAttack (audio, sr, 0.53, 0.04);
+    check (atStart >= 0.0 && atStart < 0.003, "a sound at the very start of the file is found");
+    check (std::abs (atMiddle - 0.499) < 0.002, "a marker 30 ms late snaps to the sound's start");
+    check (findAttack (audio, sr, 0.3, 0.04) < 0.0, "no sound there = nothing found");
+}
+
 int main (int argc, char** argv)
 {
     for (int i = 1; i + 1 < argc; ++i)
@@ -511,6 +610,8 @@ int main (int argc, char** argv)
     checkMetronome();
     checkMidi();
     checkRebuild();
+    checkHitGains();
+    checkFindAttack();
     runAnalysis (writeDir);
 
     std::printf ("%s (%d failed checks)\n", failures == 0 ? "OK" : "FAILED", failures);

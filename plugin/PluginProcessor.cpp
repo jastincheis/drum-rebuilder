@@ -64,6 +64,7 @@ void DrumRebuilderProcessor::installPlayback()
     if (loaded != nullptr)
     {
         originalAtDevice = std::make_unique<juce::AudioBuffer<float>> (drb::resample (loaded->audio, loaded->sampleRate, preparedRate));
+        bands.reset();
         rebuiltAtDevice.reset();
         showSource (timelineFactor());
         requestRender();
@@ -80,11 +81,11 @@ void DrumRebuilderProcessor::installPlayback()
 // (B), at the same musical spot: positions scale with the rebuilt tempo.
 void DrumRebuilderProcessor::showSource (double previousFactor)
 {
-    const auto* buffer = listenRebuilt && rebuiltAtDevice != nullptr ? rebuiltAtDevice.get() : originalAtDevice.get();
-    if (buffer == nullptr)
+    const bool rebuilt = listenRebuilt && rebuiltAtDevice != nullptr;
+    if (! rebuilt && originalAtDevice == nullptr)
         return;
     const double at = player.getPositionSeconds() * previousFactor / timelineFactor();
-    player.setSource (std::make_unique<juce::AudioBuffer<float>> (*buffer));
+    player.setSource (rebuilt ? std::make_unique<juce::AudioBuffer<float>> (*rebuiltAtDevice) : originalWithGains());
     player.setPositionSeconds (at);
     applyLoop();
     updateMetronomeGrid();
@@ -93,8 +94,127 @@ void DrumRebuilderProcessor::showSource (double previousFactor)
 void DrumRebuilderProcessor::applyLoop()
 {
     const double f = timelineFactor();
-    player.setLoop (player.isLooping(), { region.getStart() / f, region.getEnd() / f });
+    if (! previewLoop.isEmpty())
+        player.setLoop (true, { previewLoop.getStart() / f, previewLoop.getEnd() / f });
+    else
+        player.setLoop (player.isLooping(), { region.getStart() / f, region.getEnd() / f });
 }
+
+const drb::Bands& DrumRebuilderProcessor::getBands() const
+{
+    if (bands == nullptr || bands->low.getNumSamples() != originalAtDevice->getNumSamples())
+        bands = std::make_unique<drb::Bands> (drb::splitBands (*originalAtDevice, preparedRate > 0.0 ? preparedRate : 44100.0));
+    return *bands;
+}
+
+// Untouched until a hit is changed by hand; then from the bands, with the
+// hits added or moved by hand mixed in.
+std::unique_ptr<juce::AudioBuffer<float>> DrumRebuilderProcessor::originalWithGains() const
+{
+    if (! drb::hasHitGains (analysis.hits))
+        return std::make_unique<juce::AudioBuffer<float>> (*originalAtDevice);
+    auto out = std::make_unique<juce::AudioBuffer<float>> (drb::applyHitGains (getBands(), analysis.hits));
+    addHandHits (*out, nullptr);
+    return out;
+}
+
+// The hits added or moved by hand (of the instruments with gain > 0), each
+// playing its sound at its place, added into `out`.
+void DrumRebuilderProcessor::addHandHits (juce::AudioBuffer<float>& out, const drb::InstrumentGains* only) const
+{
+    auto input = makeRebuildInput();
+    drb::RebuildInput hand;
+    hand.audio = input.audio;
+    hand.sampleRate = input.sampleRate;
+    for (size_t i = 0; i < input.hits.size(); ++i)
+    {
+        const auto& h = input.hits[i];
+        const bool byHand = h.added || std::abs (h.sourceTime() - h.time) > 1.0e-9;
+        if (byHand && (only == nullptr || (*only)[(size_t) h.instrument] > 0.0f))
+        {
+            hand.hits.push_back (h);
+            hand.slices.push_back (input.slices[i]);
+        }
+    }
+    if (hand.hits.empty())
+        return;
+    const double rate = preparedRate > 0.0 ? preparedRate : 44100.0;
+    const auto sounds = drb::renderRebuild (hand, drb::RebuildSettings(), rate, 0.0);
+    const int n = std::min (out.getNumSamples(), sounds.getNumSamples());
+    for (int ch = 0; ch < out.getNumChannels(); ++ch)
+        out.addFrom (ch, 0, sounds, std::min (ch, sounds.getNumChannels() - 1), 0, n);
+}
+
+float DrumRebuilderProcessor::getHitLevelDb (int hitIndex) const
+{
+    if (originalAtDevice == nullptr)
+        return -100.0f;
+    return drb::hitLevelDb (getBands(), analysis.hits, hitIndex);
+}
+
+void DrumRebuilderProcessor::startHitPreview (int hitIndex)
+{
+    if (loaded == nullptr || ! juce::isPositiveAndBelow (hitIndex, (int) analysis.hits.size()) || ! previewLoop.isEmpty())
+        return;
+
+    // Just the hit, over and over: a little before it (to hear it come in)
+    // and its sound, so every change is heard at once.
+    const double at = analysis.hits[(size_t) hitIndex].time;
+    juce::Range<double> loop (at - 0.15, at + 0.45);
+    loop = loop.getIntersectionWith ({ 0.0, loaded->audio.getNumSamples() / loaded->sampleRate });
+    if (loop.getLength() < 0.05)
+        return;
+
+    playingBeforePreview = player.isPlaying();
+    soloPlayingBeforePreview = auditionPlayer.isPlaying();
+    loopingBeforePreview = player.isLooping();
+    positionBeforePreview = soloPlayingBeforePreview ? auditionPlayer.getPositionSeconds() : getPlayheadSeconds();
+    player.pause();
+    auditionPlayer.pause();
+    previewPlayer.stop();
+    previewLoop = loop;
+
+    if (anySolo())
+    {
+        // Solo on: only the solo instruments loop.
+        buildSoloAudio();
+        auditionPlayer.setPositionSeconds (loop.getStart());
+        auditionPlayer.play();
+    }
+    else
+    {
+        applyLoop();
+        setPlayheadSeconds (loop.getStart());
+        player.play();
+    }
+    sendChangeMessage();
+}
+
+void DrumRebuilderProcessor::endHitPreview()
+{
+    if (previewLoop.isEmpty())
+        return;
+    previewLoop = {};
+    auditionPlayer.pause();
+    auditionPlayer.setLoop (loopingBeforePreview, region);
+    player.setLoop (loopingBeforePreview, {});
+    applyLoop();
+    player.pause();
+    if (soloPlayingBeforePreview)
+    {
+        auditionPlayer.setPositionSeconds (positionBeforePreview);
+        auditionPlayer.play();
+    }
+    else if (playingBeforePreview)
+    {
+        setPlayheadSeconds (positionBeforePreview);
+        player.play();
+    }
+    else
+        setPlayheadSeconds (positionBeforePreview);
+    sendChangeMessage();
+}
+
 void DrumRebuilderProcessor::previewSample (const drb::Sample& sample)
 {
     const double rate = preparedRate > 0.0 ? preparedRate : 44100.0;
@@ -313,7 +433,8 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
             if (std::abs (rate - p->preparedRate) < 0.5 || p->preparedRate <= 0.0)
             {
                 p->originalAtDevice = std::move (result->playback);
-                p->player.setSource (std::make_unique<juce::AudioBuffer<float>> (*p->originalAtDevice));
+                p->bands.reset();
+                p->player.setSource (p->originalWithGains());
                 p->requestRender();
             }
             else
@@ -431,15 +552,33 @@ void DrumRebuilderProcessor::toggleInstrument (int index, drb::Instrument instru
     }
     else
     {
-        // As loud as the other hits at this onset, or a medium hit.
-        float velocity = 0.8f;
+        // As loud as the other hits at this onset. Where the recording has
+        // a sound (a hit found there, or a new marker on it), that is its
+        // sound; only next to hits added in the MIDI editor it borrows one.
+        float velocity = -1.0f;
+        bool ownSound = true;
         for (const auto& h : hits)
             if (std::abs (h.time - t) < 1.0e-9)
+            {
                 velocity = h.velocity;
-        drb::Hit hit { t, instrument, velocity, 1.0f, true };
-        hit.added = true;
-        hit.source = borrowedSource (instrument);
-        hit.soundVelocity = borrowedVelocity (instrument);
+                ownSound = ! h.added && h.source < 0.0;
+            }
+        if (velocity < 0.0f && loaded != nullptr)
+        {
+            // How loud the recording is there, against its loudest moment.
+            const auto& audio = loaded->audio;
+            const int a = juce::jlimit (0, audio.getNumSamples(), (int) (t * loaded->sampleRate));
+            const int len = std::min (audio.getNumSamples() - a, (int) (0.03 * loaded->sampleRate));
+            const float peak = audio.getMagnitude (0, audio.getNumSamples());
+            velocity = len > 0 && peak > 0.0f ? juce::jlimit (0.05f, 1.0f, audio.getMagnitude (a, len) / peak) : 0.8f;
+        }
+        drb::Hit hit { t, instrument, velocity < 0.0f ? 0.8f : velocity, 1.0f, true };
+        if (! ownSound)
+        {
+            hit.added = true;
+            hit.source = borrowedSource (instrument);
+            hit.soundVelocity = borrowedVelocity (instrument);
+        }
         hits.insert (std::upper_bound (hits.begin(), hits.end(), hit,
                                        [] (const drb::Hit& a, const drb::Hit& b) { return a.time < b.time; }),
                      hit);
@@ -507,9 +646,27 @@ std::optional<drb::Instrument> DrumRebuilderProcessor::suggestInstead (int index
     return std::nullopt;
 }
 
+double DrumRebuilderProcessor::findSoundStart (double seconds, double window) const
+{
+    return loaded != nullptr ? drb::findAttack (loaded->audio, loaded->sampleRate, seconds, window) : -1.0;
+}
+
 int DrumRebuilderProcessor::addHit (double seconds, drb::Instrument instrument)
 {
     auto& onsets = analysis.onsets;
+    if (const double start = findSoundStart (seconds, 0.04); start >= 0.0)
+        seconds = start;
+
+    // A hit already there: this instrument joins it.
+    for (int i = 0; i < (int) onsets.size(); ++i)
+        if (std::abs (onsets[(size_t) i].time - seconds) < 0.015)
+        {
+            const auto present = getInstrumentsAt (i);
+            if (std::find (present.begin(), present.end(), instrument) == present.end())
+                toggleInstrument (i, instrument);
+            return i;
+        }
+
     const auto it = std::upper_bound (onsets.begin(), onsets.end(), seconds,
                                       [] (double t, const drb::Onset& o) { return t < o.time; });
     const int index = (int) (it - onsets.begin());
@@ -598,28 +755,57 @@ std::pair<double, double> DrumRebuilderProcessor::getSourceSlice (int hitIndex) 
     const auto& h = analysis.hits[(size_t) hitIndex];
     const auto [in, out] = getSlice (hitIndex);
     const double shift = h.sourceTime() - h.time;
-    return { in + shift, out + shift };
+    double end = out + shift;
+
+    // Played somewhere else (moved, or a borrowed sound): its automatic cut
+    // also stops where the next sound starts in the recording, so whatever
+    // followed it there doesn't come along.
+    if (std::abs (shift) > 1.0e-9 && ! (h.sliceOut > h.sliceIn))
+        for (const auto& o : analysis.hits)
+            if (! o.added && o.sourceTime() > h.sourceTime() + 0.005)
+                end = std::min (end, o.sourceTime() - 0.002);
+    return { in + shift, std::max (in + shift + 0.005, end) };
 }
 
-// A hit added by hand has no sound of its own at its time: it plays its
-// instrument's loudest hit found by the analysis (-1 = none: the recording at
-// its time).
+// A hit added by hand has no sound of its own at its time. The sound a hit added by hand plays: the instrument's loudest hit that
+// sounds on its own (nothing else struck within 30 ms), so no other
+// instrument comes along with it; the loudest of all when none is alone.
+const drb::Hit* DrumRebuilderProcessor::borrowedHit (drb::Instrument instrument) const
+{
+    const auto& hits = analysis.hits;
+    auto alone = [&] (const drb::Hit& h)
+    {
+        return std::none_of (hits.begin(), hits.end(), [&] (const drb::Hit& o)
+        {
+            return &o != &h && ! o.added && o.instrument != instrument && std::abs (o.sourceTime() - h.sourceTime()) < 0.03;
+        });
+    };
+    const drb::Hit* best = nullptr;
+    bool bestAlone = false;
+    for (const auto& h : hits)
+    {
+        if (h.instrument != instrument || h.added)
+            continue;
+        const bool a = alone (h);
+        if (best == nullptr || (a && ! bestAlone) || (a == bestAlone && h.velocity > best->velocity))
+        {
+            best = &h;
+            bestAlone = a;
+        }
+    }
+    return best;
+}
+
 double DrumRebuilderProcessor::borrowedSource (drb::Instrument instrument) const
 {
-    const drb::Hit* best = nullptr;
-    for (const auto& h : analysis.hits)
-        if (h.instrument == instrument && ! h.added && (best == nullptr || h.velocity > best->velocity))
-            best = &h;
+    const auto* best = borrowedHit (instrument);
     return best != nullptr ? best->sourceTime() : -1.0;
 }
 
 // How loud the borrowed sound is in the recording (as a velocity).
 float DrumRebuilderProcessor::borrowedVelocity (drb::Instrument instrument) const
 {
-    const drb::Hit* best = nullptr;
-    for (const auto& h : analysis.hits)
-        if (h.instrument == instrument && ! h.added && (best == nullptr || h.velocity > best->velocity))
-            best = &h;
+    const auto* best = borrowedHit (instrument);
     return best != nullptr ? best->velocity / best->soundGain() : -1.0f;
 }
 
@@ -727,6 +913,18 @@ void DrumRebuilderProcessor::hitsChanged()
 
     requestRender();
 
+    // The recording (A) plays the hits' loudness changes too: put in again
+    // once the edits pause for a moment.
+    {
+        const int generation = ++originalGeneration;
+        juce::WeakReference<DrumRebuilderProcessor> self (this);
+        juce::Timer::callAfterDelay (40, [self, generation]
+        {
+            if (self != nullptr && generation == self->originalGeneration && ! self->listenRebuilt)
+                self->showSource (1.0);
+        });
+    }
+
     // Solo playing: hear the change, from where it was. Once the edits
     // pause for a moment, so a drag doesn't rebuild it at every step.
     if (auditionPlayer.isPlaying())
@@ -786,6 +984,12 @@ std::vector<drb::Instrument> DrumRebuilderProcessor::getSolo() const
 void DrumRebuilderProcessor::setSolo (drb::Instrument i, bool on)
 {
     solo[(size_t) i] = on;
+    if (player.isPlaying() && anySolo())
+    {
+        // The whole beat is playing: from here on only the solo ones.
+        playSolo();
+        return;
+    }
     if (auditionPlayer.isPlaying())
     {
         if (anySolo())
@@ -808,10 +1012,32 @@ void DrumRebuilderProcessor::setSolo (drb::Instrument i, bool on)
 
 // Only the solo instruments' hits: with their own sounds (A) or the rebuilt
 // beat's sounds (B), at the recording's tempo so the views stay in step.
+void DrumRebuilderProcessor::applySoloLoop()
+{
+    if (! previewLoop.isEmpty())
+        auditionPlayer.setLoop (true, previewLoop);
+    else
+        auditionPlayer.setLoop (player.isLooping(), region);
+}
+
 void DrumRebuilderProcessor::buildSoloAudio()
 {
     if (loaded == nullptr)
         return;
+
+    // The recording (A): itself, with everything not on solo taken out
+    // (band by band where hits are played together).
+    if (! listenRebuilt && originalAtDevice != nullptr)
+    {
+        drb::InstrumentGains only {};
+        for (auto i : drb::allInstruments)
+            only[(size_t) i] = solo[(size_t) i] ? 1.0f : 0.0f;
+        auto audio = std::make_unique<juce::AudioBuffer<float>> (drb::applyHitGains (getBands(), analysis.hits, &only));
+        addHandHits (*audio, &only);
+        auditionPlayer.setSource (std::move (audio));
+        applySoloLoop();
+        return;
+    }
 
     auto input = makeRebuildInput();
     drb::RebuildInput only;
@@ -828,7 +1054,7 @@ void DrumRebuilderProcessor::buildSoloAudio()
     settings.tempoFactor = 1.0;
     const double rate = preparedRate > 0.0 ? preparedRate : 44100.0;
     auditionPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::renderRebuild (only, settings, rate)));
-    auditionPlayer.setLoop (player.isLooping(), region);
+    applySoloLoop();
 }
 
 void DrumRebuilderProcessor::playSolo()

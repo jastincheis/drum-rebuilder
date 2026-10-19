@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Analyzer.h"
+#include "HitGains.h"
 #include "AudioFile.h"
 #include "Midi.h"
 #include "Rebuild.h"
@@ -74,7 +75,12 @@ public:
     // What else the sound at this hit could be: the instrument other than
     // `current` it sounds most like, if the analysis has an idea.
     std::optional<drb::Instrument> suggestInstead (int index, drb::Instrument current) const;
-    int addHit (double seconds, drb::Instrument);          // returns its index
+    // A hit the analysis missed: at the start of the sound near `seconds`
+    // (within 40 ms), playing the recording there. Onto the hit already
+    // there when one is that close. Returns its onset index.
+    int addHit (double seconds, drb::Instrument);
+    // Where a sound starts in the recording near `seconds`; negative = none.
+    double findSoundStart (double seconds, double window) const;
     bool areHitsEdited() const { return onsetsEdited; }
 
     // The same, one instrument hit at a time (index into getAnalysis().hits),
@@ -83,6 +89,12 @@ public:
     void deleteHitAt (int hitIndex);
     int addHitAt (double seconds, drb::Instrument, float velocity);  // returns its index
     void setHitVelocity (int hitIndex, float velocity, bool undoStep = true);
+    // How loud one hit sounds: the peak of its sound, in dBFS (-100 = silent).
+    float getHitLevelDb (int hitIndex) const;
+    // While a hit's loudness is being dragged: it plays in a loop, and
+    // the change is heard as it goes. End puts the transport back.
+    void startHitPreview (int hitIndex);
+    void endHitPreview();
 
     // IN / OUT of one instrument hit: where its sound starts and ends.
     // Automatic until set: from the hit to the next hit of anything (at most
@@ -216,6 +228,17 @@ private:
     void showSource (double previousFactor);   // puts the original or the rebuilt beat in the player
     double timelineFactor() const { return listenRebuilt && rebuiltAtDevice != nullptr ? tempoFactor : 1.0; }
     void applyLoop();
+    // The recording as it plays (A): each hit's stretch louder or softer
+    // as its loudness was changed by hand.
+    std::unique_ptr<juce::AudioBuffer<float>> originalWithGains() const;
+    void addHandHits (juce::AudioBuffer<float>&, const drb::InstrumentGains* only) const;
+    int originalGeneration = 0;
+    mutable std::unique_ptr<drb::Bands> bands;   // the recording at the device rate, split; made when first needed
+    const drb::Bands& getBands() const;
+    juce::Range<double> previewLoop;   // a hit's bar while its loudness is dragged
+    bool playingBeforePreview = false, soloPlayingBeforePreview = false, loopingBeforePreview = false;
+    void applySoloLoop();   // the audition player loops the region, or a hit being dragged
+    double positionBeforePreview = 0.0;
     int soloRebuild = 0;
     std::array<int, drb::numInstruments> checks {};
     std::array<int, drb::numInstruments> pendingChecks {};
@@ -248,6 +271,7 @@ private:
 
     void hitsChanged();   // after a manual edit
     void rebuildOnsets(); // one onset per distinct hit time
+    const drb::Hit* borrowedHit (drb::Instrument) const;
     double borrowedSource (drb::Instrument) const;   // the sound a hit added by hand plays
     float borrowedVelocity (drb::Instrument) const;
 

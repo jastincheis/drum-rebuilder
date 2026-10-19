@@ -31,4 +31,10 @@ OnsetFunction computeOnsetFunction (const std::vector<float>& mono, double sampl
 
 std::vector<Onset> pickOnsets (const OnsetFunction&, const std::vector<float>& mono, double sampleRate);
 
+// Where a sound starts near `around` (within `window` seconds either side):
+// the steepest rise of the level there, a millisecond early. Negative when
+// nothing starts there (no rise of at least `minRise` of the recording's peak).
+double findAttack (const juce::AudioBuffer<float>&, double sampleRate, double around, double window,
+                   float minRise = 0.05f);
+
 } // namespace drb

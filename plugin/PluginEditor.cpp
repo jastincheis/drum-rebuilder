@@ -453,7 +453,7 @@ public:
 
         setupLabel (info, theme::text);
         setupLabel (hint, theme::textDim, 12.5f);
-        hint.setText ("Click a marker: what it really is   Click: play from there   Double-click: one hit   Drag: region   Right-click: more   Wheel, Up / Down: zoom   Left / Right: hits   Space: play   W / E: start / end",
+        hint.setText ("Click a marker: what it really is   Click: play from there   Double-click: one hit   Drag: region   Right-click an empty spot: add a missed hit   Wheel, Up / Down: zoom   Left / Right: hits   Space: play   W / E: start / end",
                       juce::dontSendNotification);
         hint.setJustificationType (juce::Justification::centredRight);
         addAndMakeVisible (info);
@@ -622,8 +622,8 @@ public:
         fit.onClick = [this] { view.zoomToFit(); };
 
         setupLabel (hint, theme::textDim, 12.5f);
-        hint.setText ("S: solo    Click an empty spot: add a hit    Drag: move it (onto another row: change the instrument)"
-                      "    Drag its top / bottom: harder / softer    Double-click or Delete: remove    Ctrl+Z: undo",
+        hint.setText ("Solo: hear only that row (Ctrl: one more)    Click an empty spot: add a hit    Drag: move it (onto another row: change the instrument)"
+                      "    Drag its top / bottom: louder / softer (it loops meanwhile)    Double-click or Delete: remove    Ctrl+Z: undo",
                       juce::dontSendNotification);
         addAndMakeVisible (hint);
         update();
@@ -1606,6 +1606,15 @@ void DrumRebuilderEditor::timerCallback()
     // itself, and a closed menu leaves nothing focused.
     if (isShowing() && getPeer() != nullptr && getPeer()->isFocused() && ! hasKeyboardFocus (true))
         grabKeyboardFocus();
+
+    // Opening the MIDI editor: everything plays, no solo left over.
+    if (auto* page = tabs.getCurrentContentComponent(); page != lastPage)
+    {
+        lastPage = page;
+        if (page == midiPage)
+            for (auto inst : processor.getSolo())
+                processor.setSolo (inst, false);
+    }
 
     const auto& player = processor.getPlayer();
     const double position = processor.isSoloPlaying() ? processor.getAuditionPlayer().getPositionSeconds()

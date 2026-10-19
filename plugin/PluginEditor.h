@@ -52,6 +52,7 @@ private:
     ExportPage* exportPage = nullptr;       // owned by tabs
 
     std::unique_ptr<juce::FileChooser> chooser;
+    juce::Component* lastPage = nullptr;   // the tab shown at the last timer tick
     int shownId = -1;
 
     void togglePlay();

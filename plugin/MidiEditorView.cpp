@@ -6,7 +6,7 @@
 
 namespace
 {
-constexpr int headerWidth = 120;
+constexpr int headerWidth = 140;
 constexpr int rulerHeight = 18;
 constexpr int scrollHeight = 12;
 constexpr double minViewSeconds = 0.1;
@@ -116,7 +116,7 @@ juce::Rectangle<float> MidiEditorView::hitBox (int index) const
 juce::Rectangle<int> MidiEditorView::soloButton (int lane) const
 {
     const auto r = laneBounds (lane);
-    return { headerWidth - 34, r.getCentreY() - 11, 26, 22 };
+    return { headerWidth - 50, r.getCentreY() - 12, 42, 24 };
 }
 
 // On a hit's top or bottom edge: dragging there sets how hard it is hit.
@@ -201,7 +201,7 @@ void MidiEditorView::paint (juce::Graphics& g)
         int count = 0;
         for (const auto& h : hits)
             count += h.instrument == lanes[(size_t) l] ? 1 : 0;
-        const auto name = juce::Rectangle<int> (0, r.getY(), headerWidth - 36, r.getHeight()).withTrimmedLeft (10);
+        const auto name = juce::Rectangle<int> (0, r.getY(), headerWidth - 52, r.getHeight()).withTrimmedLeft (10);
         g.setColour (theme::instrument (lanes[(size_t) l]));
         g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
         g.drawFittedText (drb::instrumentName (lanes[(size_t) l]), name.withTrimmedBottom (r.getHeight() - r.getHeight() / 2 + 1),
@@ -211,14 +211,16 @@ void MidiEditorView::paint (juce::Graphics& g)
         g.drawText (juce::String (count) + (count == 1 ? " hit" : " hits"), name.withTrimmedTop (r.getHeight() / 2 + 2),
                     juce::Justification::topLeft);
 
-        // S: solo this row.
+        // Solo: hear only this row.
         const auto sb = soloButton (l).toFloat();
         const bool on = processor.isSolo (lanes[(size_t) l]);
         g.setColour (on ? theme::instrument (lanes[(size_t) l]) : theme::panelLight);
         g.fillRoundedRectangle (sb, 4.0f);
-        g.setColour (on ? juce::Colours::black : theme::textDim);
+        g.setColour (on ? juce::Colours::black : theme::instrument (lanes[(size_t) l]).withAlpha (0.8f));
+        g.drawRoundedRectangle (sb.reduced (0.5f), 4.0f, 1.0f);
+        g.setColour (on ? juce::Colours::black : juce::Colours::white.withAlpha (0.85f));
         g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
-        g.drawText ("S", sb, juce::Justification::centred);
+        g.drawText ("Solo", sb, juce::Justification::centred);
     }
 
     if (processor.getLoaded() == nullptr)
@@ -298,6 +300,23 @@ void MidiEditorView::paint (juce::Graphics& g)
             g.drawText ("?", juce::Rectangle<float> (x + 9.0f, box.getY() - 2.0f, 12.0f, 12.0f), juce::Justification::centred);
         }
     }
+    // How loud the hit under the mouse (or being dragged, or selected) is.
+    const int shown = dragHit >= 0 && velocityDrag ? dragHit : hoverHit >= 0 ? hoverHit : selected;
+    if (juce::isPositiveAndBelow (shown, (int) hits.size()) && laneOf (hits[(size_t) shown].instrument) >= 0)
+    {
+        const float db = processor.getHitLevelDb (shown);
+        const auto text = db <= -99.0f ? juce::String ("silent") : juce::String (db, 1) + " dB";
+        const auto box = hitBox (shown);
+        g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
+        const float w = (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), text) + 12.0f;
+        auto label = juce::Rectangle<float> (box.getRight() + 4.0f, box.getCentreY() - 10.0f, w, 20.0f);
+        if (label.getRight() > (float) area.getRight())
+            label.setX (box.getX() - 4.0f - w);
+        g.setColour (juce::Colours::black.withAlpha (0.75f));
+        g.fillRoundedRectangle (label, 4.0f);
+        g.setColour (db > 0.0f ? juce::Colours::red : juce::Colours::white);
+        g.drawText (text, label, juce::Justification::centred);
+    }
     g.restoreState();
 
     // Playhead.
@@ -320,7 +339,14 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
     for (int l = 0; l < numLanes(); ++l)
         if (soloButton (l).contains (e.getPosition()))
         {
-            processor.setSolo (lanes[(size_t) l], ! processor.isSolo (lanes[(size_t) l]));
+            // Only this row; again = everything again. Ctrl / Shift = one more.
+            const auto inst = lanes[(size_t) l];
+            const bool on = ! processor.isSolo (inst);
+            if (! (e.mods.isCtrlDown() || e.mods.isShiftDown()))
+                for (auto other : processor.getSolo())
+                    if (other != inst)
+                        processor.setSolo (other, false);
+            processor.setSolo (inst, on);
             repaint();
             return;
         }
@@ -345,10 +371,11 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
     }
     else if (const int lane = laneAt (e.y); lane >= 0 && e.x >= laneArea().getX() && e.getNumberOfClicks() == 1)
     {
-        // A new hit, medium-hard; it can be dragged right away.
+        // A new hit, medium-hard, with its instrument's own sound (one it
+        // plays alone in the recording); it can be dragged right away.
         selected = dragHit = processor.addHitAt (place (xToSeconds ((float) e.x), e.mods.isAltDown()), lanes[(size_t) lane], 0.8f);
         dragOffset = 0.0;
-        justAdded = true;
+        justAdded = dragHit >= 0;
     }
     else if (e.y < rulerHeight && e.x >= laneArea().getX())
     {
@@ -368,6 +395,11 @@ void MidiEditorView::mouseDrag (const juce::MouseEvent& e)
 
     if (velocityDrag)
     {
+        if (! hitPreviewing)
+        {
+            hitPreviewing = true;
+            processor.startHitPreview (dragHit);
+        }
         // The bar's half-height from the row's middle sets it.
         const auto r = laneBounds (laneOf (processor.getAnalysis().hits[(size_t) dragHit].instrument));
         const float half = std::abs ((float) e.y - (float) r.getCentreY());
@@ -391,13 +423,32 @@ void MidiEditorView::mouseMove (const juce::MouseEvent& e)
             return;
         }
     const int hit = processor.getLoaded() != nullptr ? hitAt (e.getPosition()) : -1;
+    if (hit != hoverHit)
+    {
+        hoverHit = hit;
+        repaint();
+    }
     setMouseCursor (hit >= 0 && onVelocityEdge (hit, e.getPosition()) ? juce::MouseCursor::UpDownResizeCursor
                     : hit >= 0                                         ? juce::MouseCursor::LeftRightResizeCursor
                                                                        : juce::MouseCursor::NormalCursor);
 }
 
+void MidiEditorView::mouseExit (const juce::MouseEvent&)
+{
+    if (hoverHit >= 0)
+    {
+        hoverHit = -1;
+        repaint();
+    }
+}
+
 void MidiEditorView::mouseUp (const juce::MouseEvent& e)
 {
+    if (hitPreviewing)
+    {
+        hitPreviewing = false;
+        processor.endHitPreview();
+    }
     // A plain click on a hit: the playhead goes there.
     if (dragHit >= 0 && ! dragMoved && ! justAdded && ! e.mods.isPopupMenu())
         processor.setPlayheadSeconds (processor.getAnalysis().hits[(size_t) dragHit].time);
