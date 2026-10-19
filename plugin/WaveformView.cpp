@@ -10,6 +10,7 @@ namespace
 constexpr int rulerHeight = 18;
 constexpr int scrollHeight = 12;
 constexpr int markerHeight = 34;   // the triangle and up to two instrument names
+constexpr float handleWidth = 22.0f;   // Instruments tab: the marker's drag handle
 constexpr double minViewSeconds = 0.05;
 } // namespace
 
@@ -327,7 +328,9 @@ void WaveformView::paint (juce::Graphics& g)
             here.push_back (&hits[k]);
         std::sort (here.begin(), here.end(), [] (auto* a, auto* b) { return a->instrument < b->instrument; });
 
-        const float x = secondsToX (o.time);
+        // Instruments tab: the marker starts where its sound is cut from
+        // (the IN of its bars), so the two line up.
+        const float x = secondsToX (instrumentMode ? markerSeconds ((int) i) : o.time);
         const bool grabbed = grab == Grab::hit && (int) i == grabbedHit;
         // Checking an instrument: its hits stand out (thicker, its colour,
         // its name first), every other hit fades.
@@ -345,16 +348,41 @@ void WaveformView::paint (juce::Graphics& g)
         else
             g.drawVerticalLine ((int) x, (float) area.getY(), (float) area.getBottom());
         g.setColour (grabbed ? juce::Colours::white : colour.withAlpha (a));
-        juce::Path tri;
         const float y = (float) area.getBottom() + 1.0f;
+
+        // Instruments tab: a handle on a stem with arrows left / right, so
+        // it is plain that the marker can be dragged (narrower where the
+        // hits are close).
+        if (instrumentMode)
+        {
+            const float before = i > 0 ? x - secondsToX (onsets[i - 1].time) : 1000.0f;
+            const float after = i + 1 < onsets.size() ? secondsToX (onsets[i + 1].time) - x : 1000.0f;
+            const float w = juce::jlimit (6.0f, handleWidth, std::min (before, after) - 2.0f);
+            const bool hot = grabbed || (int) i == hoverMarker;
+            const auto tab = juce::Rectangle<float> (x - 0.75f, y + 5.0f, w, 16.0f);   // from the line to the right
+            const auto fill = hot ? juce::Colours::white : colour.withAlpha (faded ? 0.25f : std::max (0.75f, a));
+            g.setColour (fill);
+            g.fillRect (juce::Rectangle<float> (x - 0.75f, y, 1.5f, 5.0f));
+            g.fillRoundedRectangle (tab, 3.0f);
+            if (w >= 13.0f)
+            {
+                juce::Path arrows;
+                const float cx = tab.getCentreX(), cy = tab.getCentreY(), s = w >= 18.0f ? 4.0f : 3.0f;
+                arrows.addTriangle (cx - 1.5f, cy - s, cx - 1.5f, cy + s, cx - 1.5f - s * 1.2f, cy);
+                arrows.addTriangle (cx + 1.5f, cy - s, cx + 1.5f, cy + s, cx + 1.5f + s * 1.2f, cy);
+                g.setColour (juce::Colours::black.withAlpha (0.8f));
+                g.fillPath (arrows);
+            }
+            continue;
+        }
+
+        juce::Path tri;
         const float half = isFocus ? 6.0f : 4.0f;
         tri.addTriangle (x, y, x - half, y + 7.0f, x + half, y + 7.0f);
         g.fillPath (tri);
 
         // Names: full when the neighbours leave room, one letter when not.
         // (On the Instruments tab they are on the waveform, see below.)
-        if (instrumentMode)
-            continue;
         const float before = i > 0 ? x - secondsToX (onsets[i - 1].time) : 1000.0f;
         const float after = i + 1 < onsets.size() ? secondsToX (onsets[i + 1].time) - x : 1000.0f;
         const float room = std::min (before, after);
@@ -389,8 +417,8 @@ void WaveformView::paint (juce::Graphics& g)
                 continue;
             auto present = processor.getInstrumentsAt ((int) i);
             std::sort (present.begin(), present.end());
-            const float x = secondsToX (t);
-            const float room = i + 1 < onsets.size() ? secondsToX (onsets[i + 1].time) - x : 1000.0f;
+            const float x = secondsToX (markerSeconds ((int) i));   // the names start with the marker
+            const float room = i + 1 < onsets.size() ? secondsToX (markerSeconds ((int) i + 1)) - x : 1000.0f;
             if (room < 13.0f)
                 continue;
 
@@ -401,8 +429,10 @@ void WaveformView::paint (juce::Graphics& g)
                 if (hit < 0)
                     continue;
                 const auto [in, out] = processor.getSlice (hit);
+                // The name on top (what it is), its IN..OUT bar at the bottom.
                 const float y = (float) area.getY() + 6.0f + 23.0f * (float) k;
-                const juce::Rectangle<float> bar (secondsToX (in), y, std::max (4.0f, secondsToX (out) - secondsToX (in)), 20.0f);
+                const float yBar = (float) area.getBottom() - 24.0f - 23.0f * (float) k;
+                const juce::Rectangle<float> bar (secondsToX (in), yBar, std::max (4.0f, secondsToX (out) - secondsToX (in)), 20.0f);
                 const bool dim = ! focus.empty() && ! focused (inst);
                 const auto colour = theme::instrument (inst);
 
@@ -410,13 +440,14 @@ void WaveformView::paint (juce::Graphics& g)
                 g.fillRoundedRectangle (bar, 4.0f);
                 g.setColour (colour.withAlpha (dim ? 0.2f : 0.8f));
                 g.drawRoundedRectangle (bar.reduced (0.5f), 4.0f, 1.0f);
-                // The OUT grip.
+                // The IN and OUT grips.
+                g.fillRect (juce::Rectangle<float> (bar.getX() + 1.0f, bar.getY() + 4.0f, 2.0f, bar.getHeight() - 8.0f));
                 g.fillRect (juce::Rectangle<float> (bar.getRight() - 3.0f, bar.getY() + 4.0f, 2.0f, bar.getHeight() - 8.0f));
 
                 juce::String name = drb::instrumentName (inst);
                 g.setFont (juce::FontOptions (12.5f, juce::Font::bold));
                 float w = (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), name) + 12.0f;
-                const float space = std::max (room, bar.getRight() - x) - 8.0f;
+                const float space = room - 6.0f;
                 if (w > space)
                 {
                     name = theme::shortName (inst, true);
@@ -492,6 +523,7 @@ void WaveformView::paint (juce::Graphics& g)
 // top) win otherwise.
 WaveformView::PillPart WaveformView::findPill (juce::Point<int> p, const Pill*& found) const
 {
+    // Bottom: the IN..OUT bars, by their ends. Top: the names.
     const auto onRow = [p] (const Pill& pill) { return p.y >= pill.bar.getY() && p.y < pill.bar.getBottom(); };
 
     for (auto it = pills.rbegin(); it != pills.rend(); ++it)
@@ -501,13 +533,13 @@ WaveformView::PillPart WaveformView::findPill (juce::Point<int> p, const Pill*& 
             return PillPart::out;
         }
     for (auto it = pills.rbegin(); it != pills.rend(); ++it)
-        if (onRow (*it) && p.x >= it->bar.getX() - 3 && p.x <= it->bar.getX() + 1)
+        if (onRow (*it) && p.x >= it->bar.getX() - 4 && p.x <= it->bar.getX() + 3)
         {
             found = &*it;
             return PillPart::in;
         }
     for (auto it = pills.rbegin(); it != pills.rend(); ++it)
-        if (onRow (*it) && (it->label.contains (p) || it->bar.contains (p)))
+        if (it->label.contains (p))
         {
             found = &*it;
             return PillPart::label;
@@ -572,6 +604,24 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
     dragging = false;
     dragAnchor = juce::jlimit (0.0, duration, xToSeconds ((float) e.x));
     grab = processor.getLoaded() != nullptr ? findGrab (e.getPosition(), grabbedHit) : Grab::none;
+    // Where the hit is against where it was grabbed (its handle starts at
+    // the IN, a little before the hit), so it doesn't jump.
+    markerGrabOffset = 0.0;
+    if (grab == Grab::hit && juce::isPositiveAndBelow (grabbedHit, (int) processor.getAnalysis().onsets.size()))
+        markerGrabOffset = processor.getAnalysis().onsets[(size_t) grabbedHit].time - dragAnchor;
+}
+
+double WaveformView::markerSeconds (int onset) const
+{
+    const auto& onsets = processor.getAnalysis().onsets;
+    if (! juce::isPositiveAndBelow (onset, (int) onsets.size()))
+        return 0.0;
+    const double t = onsets[(size_t) onset].time;
+    double in = t;
+    for (auto inst : processor.getInstrumentsAt (onset))
+        if (const int hit = processor.findHit (t, inst); hit >= 0)
+            in = std::min (in, processor.getSlice (hit).first);
+    return in;
 }
 
 // The flag is grabbed in the ruler, a hit by its marker under the waveform.
@@ -589,11 +639,13 @@ WaveformView::Grab WaveformView::findGrab (juce::Point<int> p, int& hitIndex) co
 
     if (p.y >= area.getBottom() && p.y < area.getBottom() + markerHeight + 2)
     {
-        float best = 7.0f;
+        float best = instrumentMode ? handleWidth * 0.5f + 2.0f : 7.0f;
         hitIndex = -1;
         for (size_t i = 0; i < analysis.onsets.size(); ++i)
         {
-            const float d = std::abs (secondsToX (analysis.onsets[i].time) - (float) p.x);
+            // Instruments tab: the handle runs from the marker's line to the right.
+            const float d = instrumentMode ? std::abs (secondsToX (markerSeconds ((int) i)) + handleWidth * 0.5f - (float) p.x)
+                                           : std::abs (secondsToX (analysis.onsets[i].time) - (float) p.x);
             if (d < best)
             {
                 best = d;
@@ -637,9 +689,22 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
         }
     }
     int hit = -1;
-    setMouseCursor (processor.getLoaded() != nullptr && findGrab (e.getPosition(), hit) != Grab::none
-                        ? juce::MouseCursor::LeftRightResizeCursor
-                        : juce::MouseCursor::NormalCursor);
+    const auto g = processor.getLoaded() != nullptr ? findGrab (e.getPosition(), hit) : Grab::none;
+    setMouseCursor (g != Grab::none ? juce::MouseCursor::LeftRightResizeCursor : juce::MouseCursor::NormalCursor);
+    if (const int hover = g == Grab::hit ? hit : -1; hover != hoverMarker)
+    {
+        hoverMarker = hover;
+        repaint();
+    }
+}
+
+void WaveformView::mouseExit (const juce::MouseEvent&)
+{
+    if (hoverMarker >= 0)
+    {
+        hoverMarker = -1;
+        repaint();
+    }
 }
 
 void WaveformView::mouseDrag (const juce::MouseEvent& e)
@@ -684,7 +749,7 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
     }
     if (grab == Grab::hit)
     {
-        processor.moveOnset (grabbedHit, t);
+        processor.moveOnset (grabbedHit, t + markerGrabOffset);
         repaint();
         return;
     }
@@ -742,6 +807,14 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
         // plays from there; on a hit's marker it asks what the hit really is.
         if (! dragging && grab == Grab::flag)
             processor.setPlayheadSeconds (processor.getAnalysis().grid.firstDownbeat);
+        else if (! dragging && instrumentMode)
+        {
+            // Instruments tab: the names on top say what a hit is; a click
+            // on a marker just goes there (a double-click deletes it).
+            const auto& onsets = processor.getAnalysis().onsets;
+            if (juce::isPositiveAndBelow (grabbedHit, (int) onsets.size()))
+                processor.setPlayheadSeconds (onsets[(size_t) grabbedHit].time);
+        }
         else if (! dragging)
         {
             const int index = grabbedHit;
@@ -821,13 +894,7 @@ void WaveformView::showMenu (const juce::MouseEvent& e)
     else
     {
         // A sound the analysis missed: a marker here, on the sound's start.
-        menu.addSectionHeader ("Add a marker here - it is a:");
-        for (auto inst : choices)
-            menu.addItem (drb::instrumentName (inst), [this, self, t, inst]
-            {
-                if (self != nullptr)
-                    processor.addHit (t, inst);
-            });
+        addInstrumentItems (menu, t);
         menu.addSeparator();
         if (hasTempo)
             menu.addItem ("Bar 1 starts here", [this, self, t]
@@ -836,6 +903,25 @@ void WaveformView::showMenu (const juce::MouseEvent& e)
                     processor.setFirstDownbeat (t);
             });
     }
+    menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
+}
+
+void WaveformView::addInstrumentItems (juce::PopupMenu& menu, double t)
+{
+    juce::WeakReference<juce::Component> self (this);
+    menu.addSectionHeader ("Add a marker here - it is a:");
+    for (auto inst : drb::allInstruments)
+        menu.addItem (drb::instrumentName (inst), [this, self, t, inst]
+        {
+            if (self != nullptr)
+                processor.addHit (t, inst);
+        });
+}
+
+void WaveformView::showAddMenu (double t)
+{
+    juce::PopupMenu menu;
+    addInstrumentItems (menu, t);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 
@@ -1024,6 +1110,35 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
         return;
     if (e.mods.isPopupMenu() || processor.getLoaded() == nullptr)
         return;
+
+    // Instruments tab: a double-click on a marker (its handle or its line)
+    // deletes it; on an empty spot it adds one, asking what it is.
+    if (instrumentMode)
+    {
+        int index = -1;
+        if (findGrab (e.getPosition(), index) != Grab::hit && waveArea().contains (e.getPosition()))
+        {
+            float best = 6.0f;
+            const auto& onsets = processor.getAnalysis().onsets;
+            for (size_t i = 0; i < onsets.size(); ++i)
+                if (const float d = std::abs (secondsToX (markerSeconds ((int) i)) - (float) e.x); d < best)
+                {
+                    best = d;
+                    index = (int) i;
+                }
+        }
+        grab = Grab::none;
+        if (index >= 0)
+        {
+            clearSelection();
+            processor.deleteHit (index);
+            hoverMarker = -1;
+        }
+        else if (e.y >= waveArea().getY())
+            showAddMenu (juce::jlimit (0.0, duration, xToSeconds ((float) e.x)));
+        repaint();
+        return;
+    }
 
     // From the hit at or before the mouse up to the next hit (or the ends of
     // the recording), starting a hair early so the attack is not cut.

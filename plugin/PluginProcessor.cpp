@@ -889,10 +889,40 @@ std::pair<double, double> DrumRebuilderProcessor::getSlice (int hitIndex) const
     if (h.sliceOut > h.sliceIn)
         return { h.time + h.sliceIn, h.time + h.sliceOut };
 
+    // Automatic: from where its sound really starts (in the recording, so a
+    // moved or borrowed hit takes its source's start along) up to the next
+    // sound's start.
     const auto& onsets = analysis.onsets;
     const auto next = std::upper_bound (onsets.begin(), onsets.end(), h.time + 1.0e-6,
                                         [] (double t, const drb::Onset& o) { return t < o.time; });
-    return { h.time - 0.002, std::min (h.time + 0.4, next != onsets.end() ? next->time - 0.002 : h.time + 0.4) };
+    const double in = h.time - (h.sourceTime() - soundStart (h.sourceTime()));
+    double out = h.time + 0.4;
+    if (next != onsets.end())
+        out = std::min (out, std::min (next->time - 0.002, soundStart (next->time)));
+    return { in, std::max (in + 0.005, out) };
+}
+
+double DrumRebuilderProcessor::soundStart (double time) const
+{
+    if (loaded == nullptr)
+        return time - 0.002;
+    if (soundStartsId != loadedId)
+    {
+        soundStarts.clear();
+        soundStartsId = loadedId;
+    }
+    const auto key = (juce::int64) std::llround (time * 1.0e6);
+    if (const auto it = soundStarts.find (key); it != soundStarts.end())
+        return it->second;
+
+    // Not back into the sound before it in the recording.
+    double earliest = 0.0;
+    for (const auto& h : analysis.hits)
+        if (! h.added && h.sourceTime() < time - 0.001)
+            earliest = std::max (earliest, h.sourceTime() + 0.001);
+    const double start = drb::findSoundStart (loaded->audio, loaded->sampleRate, time, earliest);
+    soundStarts[key] = start;
+    return start;
 }
 
 std::pair<double, double> DrumRebuilderProcessor::getSourceSlice (int hitIndex) const

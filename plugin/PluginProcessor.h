@@ -11,6 +11,8 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <map>
+
 #include <optional>
 
 class DrumRebuilderProcessor : public juce::AudioProcessor,
@@ -113,6 +115,9 @@ public:
     // 0.4 s). Drags call beginHitEdit() first.
     std::pair<double, double> getSlice (int hitIndex) const;         // around the hit's time
     std::pair<double, double> getSourceSlice (int hitIndex) const;   // where its sound is in the recording
+    // Where the sound detected at `time` (an onset of the recording) really
+    // starts: a few ms earlier, at its first sample. Remembered per recording.
+    double soundStart (double time) const;
     void setSlice (int hitIndex, double in, double out);
     int findHit (double time, drb::Instrument) const;   // -1 = none
     void quantizeHits (double divisionBeats, double strength);
@@ -302,6 +307,8 @@ private:
     juce::String status;
     int loadGeneration = 0;   // a newer load makes older results stale
     int loadedId = 0;
+    mutable std::map<juce::int64, double> soundStarts;   // by onset time in microseconds
+    mutable int soundStartsId = -1;
     double preparedRate = 0.0;
 
     juce::File previewTarget, browseFolder;

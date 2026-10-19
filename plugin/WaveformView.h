@@ -52,6 +52,7 @@ public:
     void mouseUp (const juce::MouseEvent&) override;
     void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
 private:
@@ -73,6 +74,9 @@ private:
     enum class Grab { none, flag, hit };
     Grab grab = Grab::none;
     int grabbedHit = -1;
+    int hoverMarker = -1;
+    double markerGrabOffset = 0.0;   // seconds from the mouse to the grabbed hit
+    double markerSeconds (int onset) const;   // Instruments tab: where its marker is drawn (its earliest IN)   // the marker under the mouse (its handle lights up)
 
     Grab findGrab (juce::Point<int>, int& hitIndex) const;
     double snapToHit (double seconds, int ignoreIndex) const;
@@ -109,6 +113,8 @@ private:
     void buildPeaks();
     void showMenu (const juce::MouseEvent&);
     void showRenameMenu (int hitIndex);
+    void showAddMenu (double seconds);   // "Add a marker here - it is a:"
+    void addInstrumentItems (juce::PopupMenu&, double seconds);
 
     void timerCallback() override;
     void scrollBarMoved (juce::ScrollBar*, double newRangeStart) override;

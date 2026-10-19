@@ -645,7 +645,7 @@ public:
         fit.onClick = [this] { waveform.zoomToFit(); };
 
         setupLabel (hint, theme::textDim, 12.5f);
-        hint.setText ("Click a label: what it really is    Ctrl + click / Shift + drag: select several, click one: change all    Right-click the waveform: add a hit    Drag a marker: move it"
+        hint.setText ("Top: click a name: what it really is    Bottom: drag the ends of a bar: IN / OUT    Ctrl + click / Shift + drag: select several, click one: change all    Double-click an empty spot: add a hit, on a marker: delete it    Drag a marker: move it"
                       "    Wheel, Up / Down: zoom    Space: play / stop (only the solo ones)",
                       juce::dontSendNotification);
         hint.setJustificationType (juce::Justification::centredRight);

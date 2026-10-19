@@ -37,4 +37,10 @@ std::vector<Onset> pickOnsets (const OnsetFunction&, const std::vector<float>& m
 double findAttack (const juce::AudioBuffer<float>&, double sampleRate, double around, double window,
                    float minRise = 0.05f);
 
+// Where the sound of the hit detected at `hit` really begins: going back
+// from it (not before `earliest`, at most 25 ms) as long as the recording is
+// clearly above the quiet just before the hit. The detected time can be a
+// few milliseconds into the attack; this is its first sample.
+double findSoundStart (const juce::AudioBuffer<float>&, double sampleRate, double hit, double earliest);
+
 } // namespace drb

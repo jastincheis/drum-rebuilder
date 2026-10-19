@@ -229,4 +229,46 @@ double findAttack (const juce::AudioBuffer<float>& audio, double sampleRate, dou
     return std::max (0.0, best * frame / sampleRate - 0.001);
 }
 
+double findSoundStart (const juce::AudioBuffer<float>& audio, double sampleRate, double hit, double earliest)
+{
+    const int n = audio.getNumSamples(), channels = audio.getNumChannels();
+    const int t = std::clamp ((int) std::lround (hit * sampleRate), 0, n);
+    const int limit = std::clamp ((int) std::ceil (std::max (earliest, hit - 0.025) * sampleRate), 0, t);
+    if (t - limit < 2)
+        return hit;
+
+    auto level = [&] (int i)
+    {
+        float m = 0.0f;
+        for (int ch = 0; ch < channels; ++ch)
+            m = std::max (m, std::abs (audio.getSample (ch, i)));
+        return m;
+    };
+
+    // How loud the hit gets, and the quietest millisecond before it.
+    const float peak = audio.getMagnitude (t, std::min (n - t, (int) (0.015 * sampleRate)));
+    const int ms = std::max (1, (int) (0.001 * sampleRate));
+    float quiet = peak;
+    for (int a = limit; a + ms <= t; a += ms / 2)
+        quiet = std::min (quiet, audio.getMagnitude (a, ms));
+    if (peak <= 0.0f || quiet > 0.5f * peak)
+        return hit;   // no clear start (the sound before rings as loud)
+    const float threshold = std::max (0.03f * peak, 2.0f * quiet);
+
+    // Back from the hit until a whole millisecond stays under the threshold:
+    // the sound starts right after that gap.
+    int start = t, below = 0;
+    for (int i = t - 1; i >= limit; --i)
+    {
+        if (level (i) >= threshold)
+        {
+            start = i;
+            below = 0;
+        }
+        else if (++below >= ms)
+            break;
+    }
+    return std::min (hit, std::max (earliest, (start - (int) (0.0003 * sampleRate)) / sampleRate));
+}
+
 } // namespace drb
