@@ -50,8 +50,21 @@ target_sources(drb_core INTERFACE
 target_include_directories(drb_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/core)
 target_link_libraries(drb_core INTERFACE juce::juce_audio_formats juce::juce_dsp)
 
+# drb_ui: the plugin's processor and editor without the plugin wrapper, so
+# Adormis Audio can open the whole Drum Rebuilder in a window of its own.
+# Include it as "plugin/PluginEditor.h" (the folder itself is not on the
+# include path: Adormis Audio has its own WaveformView.h).
+add_library(drb_ui INTERFACE)
+target_sources(drb_ui INTERFACE
+    ${CMAKE_CURRENT_SOURCE_DIR}/plugin/PluginProcessor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/plugin/PluginEditor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/plugin/WaveformView.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/plugin/MidiEditorView.cpp)
+target_include_directories(drb_ui INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(drb_ui INTERFACE drb_core juce::juce_audio_utils)
+
 # Only the top-level build makes the plugin and the tests; a parent project
-# that pulls this folder in just gets drb_core.
+# that pulls this folder in just gets drb_core and drb_ui.
 if(NOT PROJECT_IS_TOP_LEVEL)
     return()
 endif()
@@ -77,11 +90,6 @@ juce_add_plugin(DrumRebuilder
     FORMATS      ${DRB_FORMATS}
     VERSION      ${PROJECT_VERSION})
 
-target_sources(DrumRebuilder PRIVATE
-    plugin/PluginProcessor.cpp
-    plugin/PluginEditor.cpp
-    plugin/WaveformView.cpp
-    plugin/MidiEditorView.cpp)
 
 target_compile_definitions(DrumRebuilder PUBLIC
     JUCE_WEB_BROWSER=0
@@ -91,8 +99,7 @@ target_compile_definitions(DrumRebuilder PUBLIC
 
 target_link_libraries(DrumRebuilder
     PRIVATE
-        drb_core
-        juce::juce_audio_utils
+        drb_ui
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

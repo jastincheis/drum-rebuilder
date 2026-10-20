@@ -32,7 +32,11 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
+   #ifdef JucePlugin_Name
     const juce::String getName() const override { return JucePlugin_Name; }
+   #else
+    const juce::String getName() const override { return "Drum Rebuilder"; }   // inside another app
+   #endif
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     bool isMidiEffect() const override { return false; }
@@ -247,6 +251,14 @@ public:
     // The rebuilt beat as a stereo 24-bit WAV at the recording's sample
     // rate, with the last sounds' tails. Done in the background.
     void exportRebuiltWav (const juce::File&, std::function<void (bool ok)> done);
+    // The same beat as exportRebuiltWav, handed back as audio (rendered on a
+    // thread; `done` runs on the message thread).
+    void renderRebuilt (std::function<void (bool ok, juce::AudioBuffer<float>, double sampleRate)> done);
+
+    // Set by an app that has the editor inside it (Adormis Audio): the Export
+    // tab then offers to open the rebuilt beat there.
+    std::function<void (juce::AudioBuffer<float>, double sampleRate)> sendToHost;
+    juce::String hostName;
 
     // Instrument checks (0 = not yet, 1 = OK, 2 = wrong), kept with the state.
     int getCheck (drb::Instrument i) const { return checks[(size_t) i]; }

@@ -594,11 +594,11 @@ public:
         hint.setBounds (bottom);
     }
 
-    WaveformView& getWaveform() { return waveform; }
+    BeatWaveformView& getWaveform() { return waveform; }
 
 private:
     DrumRebuilderProcessor& processor;
-    WaveformView waveform;
+    BeatWaveformView waveform;
     juce::TextButton zoomOut { "-" }, zoomIn { "+" }, fit { "Fit" };
     juce::Label info, hint;
 };
@@ -641,7 +641,7 @@ public:
         listen.update();
     }
 
-    WaveformView& getWaveform() { return waveform; }
+    BeatWaveformView& getWaveform() { return waveform; }
 
     void paint (juce::Graphics& g) override { g.fillAll (theme::background); }
 
@@ -666,7 +666,7 @@ public:
 private:
     DrumRebuilderProcessor& processor;
     SoloBar listen;
-    WaveformView waveform;
+    BeatWaveformView waveform;
     juce::TextButton zoomOut { "-" }, zoomIn { "+" }, fit { "Fit" };
     juce::Label hint;
 };
@@ -1981,6 +1981,12 @@ public:
         wavButton.setWantsKeyboardFocus (false);
         wavButton.onClick = [this] { exportWav(); };
         addAndMakeVisible (wavButton);
+        // Only inside another app (Adormis Audio): the beat opens there as a new file.
+        hostButton.setWantsKeyboardFocus (false);
+        hostButton.setButtonText ("Open in " + processor.hostName);
+        hostButton.onClick = [this] { sendToHost(); };
+        addChildComponent (hostButton);
+        hostButton.setVisible (processor.sendToHost != nullptr);
         setupLabel (wavTitle, theme::text, 18.0f);
         wavTitle.setText ("Audio", juce::dontSendNotification);
         setupLabel (wavInfo, theme::text, 14.0f);
@@ -2026,6 +2032,7 @@ public:
         info.setText (text, juce::dontSendNotification);
         midiButton.setEnabled (processor.getLoaded() != nullptr && ! a.hits.empty());
         wavButton.setEnabled (processor.getLoaded() != nullptr && ! a.hits.empty());
+        hostButton.setEnabled (wavButton.isEnabled());
         wavInfo.setText (processor.getLoaded() == nullptr ? juce::String()
                          : "The rebuilt beat (the Drum Rack's sounds" + juce::String (processor.getKeepPitch() ? ", tuned" : "")
                                + ", at " + juce::String (processor.getRebuildBpm(), 1) + " BPM), stereo 24-bit WAV at the "
@@ -2053,6 +2060,11 @@ public:
         auto wavRow = r.removeFromTop (32);
         wavButton.setBounds (wavRow.removeFromLeft (150));
         wavRow.removeFromLeft (12);
+        if (hostButton.isVisible())
+        {
+            hostButton.setBounds (wavRow.removeFromLeft (230));
+            wavRow.removeFromLeft (12);
+        }
         wavResult.setBounds (wavRow);
         r.removeFromTop (30);
         later.setBounds (r.removeFromTop (60));
@@ -2060,7 +2072,7 @@ public:
 
 private:
     DrumRebuilderProcessor& processor;
-    juce::TextButton midiButton { "Export MIDI..." }, wavButton { "Export WAV..." };
+    juce::TextButton midiButton { "Export MIDI..." }, wavButton { "Export WAV..." }, hostButton;
     juce::Label title, info, result, later, wavTitle, wavInfo, wavResult;
 
     void exportWav()
@@ -2088,6 +2100,24 @@ private:
                               });
     }
     std::unique_ptr<juce::FileChooser> chooser;
+
+    void sendToHost()
+    {
+        wavResult.setText ("Rendering...", juce::dontSendNotification);
+        juce::Component::SafePointer<ExportPage> self (this);
+        processor.renderRebuilt ([self] (bool ok, juce::AudioBuffer<float> beat, double rate)
+        {
+            if (self == nullptr)
+                return;
+            if (! ok || self->processor.sendToHost == nullptr)
+            {
+                self->wavResult.setText ("Could not render the beat", juce::dontSendNotification);
+                return;
+            }
+            self->processor.sendToHost (std::move (beat), rate);
+            self->wavResult.setText ("Opened in " + self->processor.hostName + " as a new file", juce::dontSendNotification);
+        });
+    }
 
     void exportMidi()
     {

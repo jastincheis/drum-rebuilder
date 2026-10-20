@@ -1745,11 +1745,11 @@ void DrumRebuilderProcessor::requestRender()
     });
 }
 
-void DrumRebuilderProcessor::exportRebuiltWav (const juce::File& file, std::function<void (bool)> done)
+void DrumRebuilderProcessor::renderRebuilt (std::function<void (bool, juce::AudioBuffer<float>, double)> done)
 {
     if (loaded == nullptr)
     {
-        done (false);
+        done (false, {}, 0.0);
         return;
     }
     struct Job
@@ -1759,8 +1759,7 @@ void DrumRebuilderProcessor::exportRebuiltWav (const juce::File& file, std::func
         drb::RebuildSettings settings;
         double rate = 44100.0, bpm = 120.0;
         drb::MasterSettings master;
-        juce::File file;
-        std::function<void (bool)> done;
+        std::function<void (bool, juce::AudioBuffer<float>, double)> done;
     };
     auto job = std::make_shared<Job>();
     job->audio = loaded->audio;
@@ -1770,15 +1769,32 @@ void DrumRebuilderProcessor::exportRebuiltWav (const juce::File& file, std::func
     job->rate = loaded->sampleRate;
     job->master = master;
     job->bpm = getRebuildBpm();
-    job->file = file;
     job->done = std::move (done);
 
     juce::Thread::launch ([job]
     {
-        auto beat = drb::renderRebuild (job->input, job->settings, job->rate, 2.0 + job->master.tailSeconds (job->bpm));
-        drb::applyMaster (beat, job->rate, job->bpm, job->master);
-        const bool ok = drb::writeWav (job->file, beat, job->rate);
-        juce::MessageManager::callAsync ([job, ok] { job->done (ok); });
+        auto beat = std::make_shared<juce::AudioBuffer<float>> (
+            drb::renderRebuild (job->input, job->settings, job->rate, 2.0 + job->master.tailSeconds (job->bpm)));
+        drb::applyMaster (*beat, job->rate, job->bpm, job->master);
+        juce::MessageManager::callAsync ([job, beat] { job->done (beat->getNumSamples() > 0, std::move (*beat), job->rate); });
+    });
+}
+
+void DrumRebuilderProcessor::exportRebuiltWav (const juce::File& file, std::function<void (bool)> done)
+{
+    renderRebuilt ([file, done = std::move (done)] (bool ok, juce::AudioBuffer<float> beat, double rate)
+    {
+        if (! ok)
+        {
+            done (false);
+            return;
+        }
+        auto audio = std::make_shared<juce::AudioBuffer<float>> (std::move (beat));
+        juce::Thread::launch ([file, done, audio, rate]
+        {
+            const bool written = drb::writeWav (file, *audio, rate);
+            juce::MessageManager::callAsync ([done, written] { done (written); });
+        });
     });
 }
 

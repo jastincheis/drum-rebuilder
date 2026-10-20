@@ -14,7 +14,7 @@ constexpr float handleWidth = 22.0f;   // Instruments tab: the marker's drag han
 constexpr double minViewSeconds = 0.05;
 } // namespace
 
-WaveformView::WaveformView (DrumRebuilderProcessor& p) : processor (p)
+BeatWaveformView::BeatWaveformView (DrumRebuilderProcessor& p) : processor (p)
 {
     scrollBar.setAutoHide (false);
     scrollBar.addListener (this);
@@ -23,29 +23,29 @@ WaveformView::WaveformView (DrumRebuilderProcessor& p) : processor (p)
     startTimerHz (30);
 }
 
-WaveformView::~WaveformView()
+BeatWaveformView::~BeatWaveformView()
 {
     scrollBar.removeListener (this);
 }
 
-juce::Rectangle<int> WaveformView::waveArea() const
+juce::Rectangle<int> BeatWaveformView::waveArea() const
 {
     return getLocalBounds().withTrimmedTop (rulerHeight).withTrimmedBottom (scrollHeight + markerHeight);
 }
 
-double WaveformView::xToSeconds (float x) const
+double BeatWaveformView::xToSeconds (float x) const
 {
     const auto a = waveArea();
     return viewStart + (x - (float) a.getX()) / (float) std::max (1, a.getWidth()) * (viewEnd - viewStart);
 }
 
-float WaveformView::secondsToX (double s) const
+float BeatWaveformView::secondsToX (double s) const
 {
     const auto a = waveArea();
     return (float) a.getX() + (float) ((s - viewStart) / (viewEnd - viewStart) * a.getWidth());
 }
 
-void WaveformView::refresh()
+void BeatWaveformView::refresh()
 {
     // A new recording: rebuild the overview and show all of it.
     if (processor.getLoadedId() != shownId)
@@ -58,7 +58,7 @@ void WaveformView::refresh()
     repaint();
 }
 
-void WaveformView::buildPeaks()
+void BeatWaveformView::buildPeaks()
 {
     peaks.clear();
     const auto* l = processor.getLoaded();
@@ -92,7 +92,7 @@ void WaveformView::buildPeaks()
     }
 }
 
-void WaveformView::setView (double start, double end)
+void BeatWaveformView::setView (double start, double end)
 {
     const double total = std::max (duration, minViewSeconds);
     double len = juce::jlimit (minViewSeconds, total, end - start);
@@ -105,25 +105,25 @@ void WaveformView::setView (double start, double end)
     repaint();
 }
 
-void WaveformView::zoomToFit()
+void BeatWaveformView::zoomToFit()
 {
     setView (0.0, std::max (duration, minViewSeconds));
 }
 
-void WaveformView::zoomBy (double factor, double around)
+void BeatWaveformView::zoomBy (double factor, double around)
 {
     const double len = (viewEnd - viewStart) / factor;
     const double rel = (around - viewStart) / (viewEnd - viewStart);
     setView (around - rel * len, around - rel * len + len);
 }
 
-double WaveformView::zoomCentre() const
+double BeatWaveformView::zoomCentre() const
 {
     const double pos = processor.getPlayheadSeconds();
     return pos >= viewStart && pos <= viewEnd ? pos : centreSeconds();
 }
 
-void WaveformView::scrollToShow (double seconds)
+void BeatWaveformView::scrollToShow (double seconds)
 {
     if (seconds < viewStart || seconds > viewEnd)
     {
@@ -132,7 +132,7 @@ void WaveformView::scrollToShow (double seconds)
     }
 }
 
-void WaveformView::jumpToHit (int direction)
+void BeatWaveformView::jumpToHit (int direction)
 {
     const auto& onsets = processor.getAnalysis().onsets;
     auto& solo = processor.getAuditionPlayer();
@@ -176,12 +176,12 @@ void WaveformView::jumpToHit (int direction)
     repaint();
 }
 
-void WaveformView::resized()
+void BeatWaveformView::resized()
 {
     scrollBar.setBounds (getLocalBounds().removeFromBottom (scrollHeight));
 }
 
-void WaveformView::paint (juce::Graphics& g)
+void BeatWaveformView::paint (juce::Graphics& g)
 {
     g.fillAll (theme::background);
     const auto area = waveArea();
@@ -525,7 +525,7 @@ void WaveformView::paint (juce::Graphics& g)
 // its name, or nothing. An OUT wins over the IN of the next bar it touches
 // (by default each bar ends where the next hit starts); later bars (drawn on
 // top) win otherwise.
-WaveformView::PillPart WaveformView::findPill (juce::Point<int> p, const Pill*& found) const
+BeatWaveformView::PillPart BeatWaveformView::findPill (juce::Point<int> p, const Pill*& found) const
 {
     // Bottom: the IN..OUT bars, by their ends. Top: the names.
     const auto onRow = [p] (const Pill& pill) { return p.y >= pill.bar.getY() && p.y < pill.bar.getBottom(); };
@@ -552,7 +552,7 @@ WaveformView::PillPart WaveformView::findPill (juce::Point<int> p, const Pill*& 
     return PillPart::none;
 }
 
-void WaveformView::mouseDown (const juce::MouseEvent& e)
+void BeatWaveformView::mouseDown (const juce::MouseEvent& e)
 {
     pillPressed = false;
     slicePart = PillPart::none;
@@ -615,7 +615,7 @@ void WaveformView::mouseDown (const juce::MouseEvent& e)
         markerGrabOffset = processor.getAnalysis().onsets[(size_t) grabbedHit].time - dragAnchor;
 }
 
-double WaveformView::markerSeconds (int onset) const
+double BeatWaveformView::markerSeconds (int onset) const
 {
     const auto& onsets = processor.getAnalysis().onsets;
     if (! juce::isPositiveAndBelow (onset, (int) onsets.size()))
@@ -629,7 +629,7 @@ double WaveformView::markerSeconds (int onset) const
 }
 
 // The flag is grabbed in the ruler, a hit by its marker under the waveform.
-WaveformView::Grab WaveformView::findGrab (juce::Point<int> p, int& hitIndex) const
+BeatWaveformView::Grab BeatWaveformView::findGrab (juce::Point<int> p, int& hitIndex) const
 {
     const auto& analysis = processor.getAnalysis();
     const auto area = waveArea();
@@ -663,7 +663,7 @@ WaveformView::Grab WaveformView::findGrab (juce::Point<int> p, int& hitIndex) co
 }
 
 // The nearest hit within 8 pixels, or `seconds` itself.
-double WaveformView::snapToHit (double seconds, int ignoreIndex) const
+double BeatWaveformView::snapToHit (double seconds, int ignoreIndex) const
 {
     const auto& onsets = processor.getAnalysis().onsets;
     double best = seconds;
@@ -680,7 +680,7 @@ double WaveformView::snapToHit (double seconds, int ignoreIndex) const
     return best;
 }
 
-void WaveformView::mouseMove (const juce::MouseEvent& e)
+void BeatWaveformView::mouseMove (const juce::MouseEvent& e)
 {
     if (const Pill* pill = nullptr; instrumentMode)
     {
@@ -702,7 +702,7 @@ void WaveformView::mouseMove (const juce::MouseEvent& e)
     }
 }
 
-void WaveformView::mouseExit (const juce::MouseEvent&)
+void BeatWaveformView::mouseExit (const juce::MouseEvent&)
 {
     if (hoverMarker >= 0)
     {
@@ -711,7 +711,7 @@ void WaveformView::mouseExit (const juce::MouseEvent&)
     }
 }
 
-void WaveformView::mouseDrag (const juce::MouseEvent& e)
+void BeatWaveformView::mouseDrag (const juce::MouseEvent& e)
 {
     if (pillPressed || selectClick)
         return;
@@ -761,7 +761,7 @@ void WaveformView::mouseDrag (const juce::MouseEvent& e)
     processor.setRegion ({ std::min (dragAnchor, t), std::max (dragAnchor, t) });
 }
 
-void WaveformView::mouseUp (const juce::MouseEvent& e)
+void BeatWaveformView::mouseUp (const juce::MouseEvent& e)
 {
     if (selectClick)
     {
@@ -844,7 +844,7 @@ void WaveformView::mouseUp (const juce::MouseEvent& e)
     repaint();
 }
 
-void WaveformView::showMenu (const juce::MouseEvent& e)
+void BeatWaveformView::showMenu (const juce::MouseEvent& e)
 {
     if (processor.getLoaded() == nullptr)
         return;
@@ -910,7 +910,7 @@ void WaveformView::showMenu (const juce::MouseEvent& e)
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 
-void WaveformView::addInstrumentItems (juce::PopupMenu& menu, double t)
+void BeatWaveformView::addInstrumentItems (juce::PopupMenu& menu, double t)
 {
     juce::WeakReference<juce::Component> self (this);
     menu.addSectionHeader ("Add a marker here - it is a:");
@@ -925,20 +925,20 @@ void WaveformView::addInstrumentItems (juce::PopupMenu& menu, double t)
         });
 }
 
-void WaveformView::showAddMenu (double t)
+void BeatWaveformView::showAddMenu (double t)
 {
     juce::PopupMenu menu;
     addInstrumentItems (menu, t);
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 
-bool WaveformView::isSelected (double time, drb::Instrument inst) const
+bool BeatWaveformView::isSelected (double time, drb::Instrument inst) const
 {
     return std::any_of (selection.begin(), selection.end(),
                         [&] (const Selected& s) { return s.second == inst && std::abs (s.first - time) < 1.0e-9; });
 }
 
-void WaveformView::toggleSelected (double time, drb::Instrument inst)
+void BeatWaveformView::toggleSelected (double time, drb::Instrument inst)
 {
     const auto it = std::find_if (selection.begin(), selection.end(),
                                   [&] (const Selected& s) { return s.second == inst && std::abs (s.first - time) < 1.0e-9; });
@@ -949,7 +949,7 @@ void WaveformView::toggleSelected (double time, drb::Instrument inst)
     repaint();
 }
 
-bool WaveformView::clearSelection()
+bool BeatWaveformView::clearSelection()
 {
     if (selection.empty())
         return false;
@@ -958,7 +958,7 @@ bool WaveformView::clearSelection()
     return true;
 }
 
-void WaveformView::pruneSelection()
+void BeatWaveformView::pruneSelection()
 {
     const auto& hits = processor.getAnalysis().hits;
     selection.erase (std::remove_if (selection.begin(), selection.end(), [&] (const Selected& s)
@@ -970,7 +970,7 @@ void WaveformView::pruneSelection()
 }
 
 // A click on one of several selected labels: what they all really are.
-void WaveformView::showSelectionMenu()
+void BeatWaveformView::showSelectionMenu()
 {
     juce::WeakReference<juce::Component> self (this);
     juce::PopupMenu menu;
@@ -1001,7 +1001,7 @@ void WaveformView::showSelectionMenu()
 
 // A click on an instrument's label: what it really is (the likeliest first),
 // or that it isn't there at all.
-void WaveformView::showPillMenu (int index, drb::Instrument from)
+void BeatWaveformView::showPillMenu (int index, drb::Instrument from)
 {
     juce::WeakReference<juce::Component> self (this);
     const auto present = processor.getInstrumentsAt (index);
@@ -1048,7 +1048,7 @@ void WaveformView::showPillMenu (int index, drb::Instrument from)
 
 // "This is the Snare. It is really: ..." for a click on a hit's marker:
 // every instrument, the one it sounds most like first.
-void WaveformView::showRenameMenu (int index)
+void BeatWaveformView::showRenameMenu (int index)
 {
     const auto present = processor.getInstrumentsAt (index);
     if (present.empty())
@@ -1111,7 +1111,7 @@ void WaveformView::showRenameMenu (int index)
     menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
 }
 
-void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
+void BeatWaveformView::mouseDoubleClick (const juce::MouseEvent& e)
 {
     if (const Pill* pill = nullptr; instrumentMode && findPill (e.getPosition(), pill) != PillPart::none)
         return;
@@ -1198,7 +1198,7 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
     repaint();
 }
 
-void WaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
+void BeatWaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
 {
     if (processor.getLoaded() == nullptr)
         return;
@@ -1215,7 +1215,7 @@ void WaveformView::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseW
     zoomBy (std::pow (2.0, (double) w.deltaY * 2.0), xToSeconds ((float) e.x));
 }
 
-void WaveformView::scrollBarMoved (juce::ScrollBar*, double newStart)
+void BeatWaveformView::scrollBarMoved (juce::ScrollBar*, double newStart)
 {
     const double len = viewEnd - viewStart;
     viewStart = newStart;
@@ -1223,7 +1223,7 @@ void WaveformView::scrollBarMoved (juce::ScrollBar*, double newStart)
     repaint();
 }
 
-void WaveformView::timerCallback()
+void BeatWaveformView::timerCallback()
 {
     const bool auditioning = processor.isSoloPlaying();
     const double pos = auditioning ? processor.getAuditionPlayer().getPositionSeconds() : processor.getPlayheadSeconds();

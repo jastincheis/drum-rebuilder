@@ -13,13 +13,13 @@
 // click = "Bar 1 starts here", mouse wheel = zoom, shift + wheel or the
 // scrollbar = move along. The yellow flag (bar 1, where the beat starts) and
 // the hit markers under the waveform can be dragged.
-class WaveformView : public juce::Component,
+class BeatWaveformView : public juce::Component,
                      private juce::Timer,
                      private juce::ScrollBar::Listener
 {
 public:
-    explicit WaveformView (DrumRebuilderProcessor&);
-    ~WaveformView() override;
+    explicit BeatWaveformView (DrumRebuilderProcessor&);
+    ~BeatWaveformView() override;
 
     // Call when the recording or its analysis changed.
     void refresh();
