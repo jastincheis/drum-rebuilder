@@ -45,7 +45,8 @@ target_sources(drb_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Midi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Samples.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Rebuild.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/core/HitGains.cpp)
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/HitGains.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/Effects.cpp)
 target_include_directories(drb_core INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/core)
 target_link_libraries(drb_core INTERFACE juce::juce_audio_formats juce::juce_dsp)
 

@@ -22,23 +22,6 @@ void setupLabel (juce::Label& l, juce::Colour c, float size = 14.0f)
     l.setInterceptsMouseClicks (false, false);
 }
 
-// Stand-in for a section that later stages fill in.
-class Placeholder : public juce::Component
-{
-public:
-    Placeholder (const juce::String& title, const juce::String& stage)
-    {
-        label.setText (title + "\n\n" + stage, juce::dontSendNotification);
-        label.setJustificationType (juce::Justification::centred);
-        setupLabel (label, theme::textDim, 18.0f);
-        addAndMakeVisible (label);
-    }
-
-    void resized() override { label.setBounds (getLocalBounds()); }
-
-private:
-    juce::Label label;
-};
 } // namespace
 
 // --- Import --------------------------------------------------------------
@@ -1328,17 +1311,18 @@ private:
 // --- Drum Rack (rebuild) ---------------------------------------------------
 
 // One row per instrument: how its hits pick their sound, which sound.
-// A Drum Rack row's sound: its waveform and how long it plays (the orange
-// handle; what is after it is cut, with a short fade). Drag the handle (or
-// anywhere on the waveform); double-click = all of it again; click = hear it
-// as it plays now.
+// A Drum Rack row's sound: its waveform and which part of it plays, from
+// IN (the left handle: what is before it is skipped, the rest starts at the
+// hit) to OUT (the right one: what is after it is cut, with a short fade).
+// Drag a handle (or near it); double-click = all of it again; click = hear
+// it as it plays now.
 class SoundLengthView : public juce::Component,
                         public juce::SettableTooltipClient
 {
 public:
     SoundLengthView (DrumRebuilderProcessor& p, drb::Instrument i) : processor (p), instrument (i)
     {
-        setTooltip ("How long this sound plays at every hit: drag the orange line. Double-click: all of it");
+        setTooltip ("Which part of this sound plays at every hit: drag IN (left) and OUT (right). Double-click: all of it");
     }
 
     void update()
@@ -1350,7 +1334,10 @@ public:
         if (changed)
             buildPeaks();
         if (! dragging)
+        {
             length = processor.getSoundLength (instrument);
+            start = processor.getSoundStart (instrument);
+        }
         repaint();
     }
 
@@ -1367,27 +1354,30 @@ public:
             return;
         }
         const float x0 = r.getX() + 2.0f, w = r.getWidth() - 4.0f, mid = r.getCentreY(), half = r.getHeight() * 0.45f;
-        const float cutX = lengthX();
+        const float cutX = lengthX(), inX = startX();
         const auto colour = theme::instrument (instrument);
         for (size_t k = 0; k < peaks.size(); ++k)
         {
             const float x = x0 + w * (float) k / (float) peaks.size();
-            g.setColour (x > cutX ? colour.withAlpha (0.18f) : colour.withAlpha (0.9f));
+            g.setColour (x > cutX || x < inX ? colour.withAlpha (0.18f) : colour.withAlpha (0.9f));
             g.drawVerticalLine ((int) x, mid - peaks[k] * half, mid + peaks[k] * half + 1.0f);
         }
+        g.setColour (juce::Colours::black.withAlpha (0.35f));
         if (length > 0.0)
-        {
-            g.setColour (juce::Colours::black.withAlpha (0.35f));
             g.fillRect (juce::Rectangle<float> (cutX, r.getY(), r.getRight() - cutX, r.getHeight()));
-        }
-        // The handle.
+        if (start > 0.0)
+            g.fillRect (juce::Rectangle<float> (r.getX(), r.getY(), inX - r.getX(), r.getHeight()));
+        // The handles: IN (tab at the bottom) and OUT (tab at the top).
         g.setColour (theme::accent);
-        g.fillRect (juce::Rectangle<float> (cutX - 1.5f, r.getY(), 3.0f, r.getHeight()));
+        for (float x : { inX, cutX })
+            g.fillRect (juce::Rectangle<float> (x - 1.5f, r.getY(), 3.0f, r.getHeight()));
         g.fillRoundedRectangle (juce::Rectangle<float> (cutX - 5.0f, r.getY(), 10.0f, 8.0f), 2.0f);
+        g.fillRoundedRectangle (juce::Rectangle<float> (inX - 5.0f, r.getBottom() - 8.0f, 10.0f, 8.0f), 2.0f);
 
-        const double full = soundSeconds();
-        const auto text = length > 0.0 && length < full ? juce::String (length, 2) + " s  of  " + juce::String (full, 2) + " s"
-                                                        : juce::String (full, 2) + " s  (all)";
+        const double full = soundSeconds(), end = length > 0.0 && length < full ? length : full;
+        const auto text = start <= 0.0 && end >= full ? juce::String (full, 2) + " s  (all)"
+                                                     : juce::String (start, 2) + " - " + juce::String (end, 2) + " s  of  "
+                                                           + juce::String (full, 2) + " s";
         g.setFont (juce::FontOptions (11.5f, juce::Font::bold));
         const float tw = (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), text) + 10.0f;
         const auto label = juce::Rectangle<float> (r.getRight() - tw - 3.0f, r.getY() + 2.0f, tw, 15.0f);
@@ -1399,13 +1389,17 @@ public:
 
     void mouseMove (const juce::MouseEvent& e) override
     {
-        setMouseCursor (std::abs ((float) e.x - lengthX()) < 8.0f ? juce::MouseCursor::LeftRightResizeCursor
-                                                                  : juce::MouseCursor::PointingHandCursor);
+        setMouseCursor (std::min (std::abs ((float) e.x - lengthX()), std::abs ((float) e.x - startX())) < 8.0f
+                            ? juce::MouseCursor::LeftRightResizeCursor
+                            : juce::MouseCursor::PointingHandCursor);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
-        dragging = sound != nullptr && std::abs ((float) e.x - lengthX()) < 8.0f;
+        // The handle nearer the mouse (on top of each other: IN when below the middle).
+        const float toIn = std::abs ((float) e.x - startX()), toOut = std::abs ((float) e.x - lengthX());
+        draggingIn = toIn < toOut - 0.5f || (std::abs (toIn - toOut) <= 0.5f && e.y > getHeight() / 2);
+        dragging = sound != nullptr && std::min (toIn, toOut) < 8.0f;
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
@@ -1413,9 +1407,15 @@ public:
         if (sound == nullptr || (! dragging && e.getDistanceFromDragStart() < 3))
             return;
         dragging = true;
-        const double full = soundSeconds();
-        const double t = juce::jlimit (0.01, full, full * (e.x - 2.0) / std::max (1.0, getWidth() - 4.0));
-        length = t >= full * 0.995 ? 0.0 : t;
+        const double full = soundSeconds(), end = length > 0.0 ? length : full;
+        const double t = juce::jlimit (0.0, full, full * (e.x - 2.0) / std::max (1.0, getWidth() - 4.0));
+        if (draggingIn)
+            start = t <= full * 0.005 ? 0.0 : std::min (t, end - 0.01);
+        else
+        {
+            const double out = std::max (t, start + 0.01);
+            length = out >= full * 0.995 ? 0.0 : out;
+        }
         repaint();
     }
 
@@ -1424,7 +1424,7 @@ public:
         if (dragging)
         {
             dragging = false;
-            processor.setSoundLength (instrument, length);
+            processor.setSoundRange (instrument, start, length);
         }
         else
             listen();
@@ -1432,8 +1432,8 @@ public:
 
     void mouseDoubleClick (const juce::MouseEvent&) override
     {
-        length = 0.0;
-        processor.setSoundLength (instrument, 0.0);
+        start = length = 0.0;
+        processor.setSoundRange (instrument, 0.0, 0.0);
     }
 
     // Plays the sound as long as it is set to.
@@ -1441,18 +1441,27 @@ public:
     {
         if (sound == nullptr)
             return;
-        if (length <= 0.0 || length >= soundSeconds())
+        const int all = sound->audio.getNumSamples();
+        if (start <= 0.0 && (length <= 0.0 || length >= soundSeconds()))
         {
             processor.previewSample (*sound);
             return;
         }
+        // IN to OUT, with the same short fades as in the beat.
         drb::Sample cut;
         cut.sampleRate = sound->sampleRate;
-        const int end = std::max (1, (int) std::ceil (length * sound->sampleRate));
-        cut.audio.makeCopyOf (sound->audio);
-        cut.audio.setSize (sound->audio.getNumChannels(), end, true);
-        const int n = std::min (end, (int) (0.015 * sound->sampleRate));
-        cut.audio.applyGainRamp (end - n, n, 1.0f, 0.0f);
+        const int end = length > 0.0 ? juce::jlimit (1, all, (int) std::ceil (length * sound->sampleRate)) : all;
+        const int begin = juce::jlimit (0, std::max (0, end - 1), (int) (start * sound->sampleRate));
+        cut.audio.setSize (sound->audio.getNumChannels(), end - begin);
+        for (int ch = 0; ch < sound->audio.getNumChannels(); ++ch)
+            cut.audio.copyFrom (ch, 0, sound->audio, ch, begin, end - begin);
+        if (end < all)
+        {
+            const int n = std::min (end - begin, (int) (0.015 * sound->sampleRate));
+            cut.audio.applyGainRamp (end - begin - n, n, 1.0f, 0.0f);
+        }
+        if (begin > 0)
+            cut.audio.applyGainRamp (0, std::min (end - begin, (int) (0.002 * sound->sampleRate)), 0.0f, 1.0f);
         processor.previewSample (cut);
     }
 
@@ -1461,10 +1470,16 @@ private:
     drb::Instrument instrument;
     drb::SamplePtr sound;
     std::vector<float> peaks;
-    double length = 0.0;
-    bool dragging = false;
+    double length = 0.0, start = 0.0;   // OUT (0 = the end), IN (seconds)
+    bool dragging = false, draggingIn = false;
 
     double soundSeconds() const { return sound != nullptr ? sound->audio.getNumSamples() / sound->sampleRate : 0.0; }
+
+    float startX() const
+    {
+        const double full = soundSeconds();
+        return 2.0f + (float) (getWidth() - 4) * (float) (full > 0.0 ? std::min (start, full) / full : 0.0);
+    }
 
     float lengthX() const
     {
@@ -1663,7 +1678,7 @@ public:
         setupLabel (status, theme::textDim, 13.0f);
         setupLabel (hint, theme::textDim, 12.5f);
         hint.setText ("Space / Play plays A or B in a loop over its bars. Left / Right: the sounds before / next sounds for the ticked instruments. "
-                      "Drag the orange line on a sound: how long it plays (double-click: all of it). "
+                      "Drag the orange lines on a sound: where it starts (IN) and stops (OUT); double-click: all of it. "
                       "Save the originals and add your own sounds on the Sample Browser tab.",
                       juce::dontSendNotification);
         addAndMakeVisible (status);
@@ -1769,6 +1784,188 @@ private:
     juce::ToggleButton keepPitch { "Keep original pitch" };
     juce::Label tempoLabel, status, hint;
     juce::Slider tempo { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+};
+
+// --- Master --------------------------------------------------------------
+
+// Volume, reverb and delay on the whole rebuilt beat (B) and its export.
+// Each effect: On / Off (the settings stay), Amount and Length.
+class MasterPage : public juce::Component
+{
+public:
+    explicit MasterPage (DrumRebuilderProcessor& p) : processor (p)
+    {
+        for (auto* b : { &aButton, &bButton })
+        {
+            b->setClickingTogglesState (false);
+            b->setWantsKeyboardFocus (false);
+            addAndMakeVisible (b);
+        }
+        aButton.onClick = [this] { processor.setListeningRebuilt (false); };
+        bButton.onClick = [this] { processor.setListeningRebuilt (true); };
+        aButton.setTooltip ("Hear the recording as it is (no Master)");
+        bButton.setTooltip ("Hear the rebuilt beat with the Master");
+
+        setupSlider (volume, " dB", -24.0, 6.0, 0.1);
+        volume.setDoubleClickReturnValue (true, 0.0);
+        volume.setTooltip ("The whole beat louder or softer. Double-click: 0 dB");
+        for (auto* s : { &reverbAmount, &reverbLength, &delayAmount })
+        {
+            setupSlider (*s, " %", 0.0, 100.0, 1.0);
+            s->setNumDecimalPlacesToDisplay (0);
+        }
+        reverbAmount.setTooltip ("How much reverb is heard");
+        reverbLength.setTooltip ("A small room (short) .. a long hall");
+        delayAmount.setTooltip ("How loud the echoes are");
+
+        for (size_t k = 0; k < drb::delayNames.size(); ++k)
+            delayLength.addItem (drb::delayNames[k], (int) k + 1);
+        delayLength.setWantsKeyboardFocus (false);
+        delayLength.setTooltip ("The time between echoes, in notes at the beat's tempo");
+        delayLength.onChange = [this] { send(); };
+        addAndMakeVisible (delayLength);
+
+        for (auto* t : { &reverbOn, &delayOn })
+        {
+            t->setWantsKeyboardFocus (false);
+            t->onClick = [this] { send(); };
+            addAndMakeVisible (t);
+        }
+        reverbOn.setTooltip ("Off keeps the settings");
+        delayOn.setTooltip ("Off keeps the settings");
+
+        for (auto* l : { &volumeLabel, &reverbTitle, &delayTitle, &reverbAmountLabel, &reverbLengthLabel, &delayAmountLabel, &delayLengthLabel })
+        {
+            setupLabel (*l, theme::text, 14.0f);
+            addAndMakeVisible (l);
+        }
+        for (auto* l : { &reverbTitle, &delayTitle, &volumeLabel })
+            l->setFont (juce::FontOptions (17.0f, juce::Font::bold));
+        volumeLabel.setText ("Volume", juce::dontSendNotification);
+        reverbTitle.setText ("Reverb", juce::dontSendNotification);
+        delayTitle.setText ("Delay", juce::dontSendNotification);
+        for (auto* l : { &reverbAmountLabel, &delayAmountLabel })
+            l->setText ("Amount", juce::dontSendNotification);
+        for (auto* l : { &reverbLengthLabel, &delayLengthLabel })
+            l->setText ("Length", juce::dontSendNotification);
+
+        setupLabel (status, theme::textDim, 13.0f);
+        setupLabel (hint, theme::textDim, 12.5f);
+        hint.setText ("The Master is heard on B (the rebuilt beat) and goes into the exported WAV. "
+                      "Off keeps an effect's settings for when you switch it on again. The delay follows the beat's tempo.",
+                      juce::dontSendNotification);
+        addAndMakeVisible (status);
+        addAndMakeVisible (hint);
+        update();
+    }
+
+    void update()
+    {
+        const auto& m = processor.getMaster();
+        volume.setValue (m.volumeDb, juce::dontSendNotification);
+        reverbOn.setToggleState (m.reverb.on, juce::dontSendNotification);
+        reverbAmount.setValue (m.reverb.amount * 100.0, juce::dontSendNotification);
+        reverbLength.setValue (m.reverb.length * 100.0, juce::dontSendNotification);
+        delayOn.setToggleState (m.delay.on, juce::dontSendNotification);
+        delayAmount.setValue (m.delay.amount * 100.0, juce::dontSendNotification);
+        delayLength.setSelectedId (m.delay.length + 1, juce::dontSendNotification);
+        // Off: its settings are shown, dimmed.
+        for (auto* c : std::initializer_list<juce::Component*> { &reverbAmount, &reverbLength })
+            c->setAlpha (m.reverb.on ? 1.0f : 0.45f);
+        for (auto* c : std::initializer_list<juce::Component*> { &delayAmount, &delayLength })
+            c->setAlpha (m.delay.on ? 1.0f : 0.45f);
+
+        const bool b = processor.isListeningRebuilt();
+        aButton.setToggleState (! b, juce::dontSendNotification);
+        bButton.setToggleState (b, juce::dontSendNotification);
+        status.setText (processor.getLoaded() == nullptr ? juce::String ("Open a beat first")
+                        : processor.isRendering()        ? juce::String ("Rebuilding...")
+                        : b                              ? juce::String ("Listening: B, the rebuilt beat with the Master")
+                                                         : juce::String ("Listening: A, the recording (no Master)"),
+                        juce::dontSendNotification);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        g.fillAll (theme::background);
+        g.setColour (theme::panel);
+        for (const auto& box : { reverbBox, delayBox })
+            g.fillRoundedRectangle (box.toFloat(), 6.0f);
+    }
+
+    void resized() override
+    {
+        auto r = getLocalBounds().reduced (12);
+        auto bar = r.removeFromTop (34);
+        aButton.setBounds (bar.removeFromLeft (110));
+        bar.removeFromLeft (4);
+        bButton.setBounds (bar.removeFromLeft (110));
+        bar.removeFromLeft (16);
+        status.setBounds (bar);
+        hint.setBounds (r.removeFromBottom (22));
+
+        r.removeFromTop (16);
+        auto row = r.removeFromTop (34);
+        volumeLabel.setBounds (row.removeFromLeft (110));
+        volume.setBounds (row.removeFromLeft (std::min (520, row.getWidth())));
+        r.removeFromTop (16);
+
+        auto boxes = r.removeFromTop (150);
+        const int w = std::min (520, (boxes.getWidth() - 12) / 2);
+        reverbBox = boxes.removeFromLeft (w);
+        boxes.removeFromLeft (12);
+        delayBox = boxes.removeFromLeft (w);
+        layoutBox (reverbBox, reverbTitle, reverbOn, reverbAmountLabel, reverbAmount, reverbLengthLabel, reverbLength);
+        layoutBox (delayBox, delayTitle, delayOn, delayAmountLabel, delayAmount, delayLengthLabel, delayLength);
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    juce::TextButton aButton { "A  Original" }, bButton { "B  Rebuilt" };
+    juce::Slider volume, reverbAmount, reverbLength, delayAmount;
+    juce::ComboBox delayLength;
+    juce::ToggleButton reverbOn { "On" }, delayOn { "On" };
+    juce::Label volumeLabel, reverbTitle, delayTitle, reverbAmountLabel, reverbLengthLabel, delayAmountLabel, delayLengthLabel, status, hint;
+    juce::Rectangle<int> reverbBox, delayBox;
+
+    void setupSlider (juce::Slider& s, const juce::String& suffix, double lo, double hi, double step)
+    {
+        s.setSliderStyle (juce::Slider::LinearHorizontal);
+        s.setTextBoxStyle (juce::Slider::TextBoxRight, false, 80, 22);
+        s.setRange (lo, hi, step);
+        s.setTextValueSuffix (suffix);
+        s.setWantsKeyboardFocus (false);
+        s.setColour (juce::Slider::backgroundColourId, theme::panelLight);
+        s.setColour (juce::Slider::trackColourId, theme::accent.withAlpha (0.7f));
+        s.onValueChange = [this] { send(); };
+        addAndMakeVisible (s);
+    }
+
+    static void layoutBox (juce::Rectangle<int> box, juce::Label& title, juce::ToggleButton& on, juce::Label& amountLabel,
+                           juce::Component& amount, juce::Label& lengthLabel, juce::Component& length)
+    {
+        auto r = box.reduced (12);
+        auto top = r.removeFromTop (30);
+        title.setBounds (top.removeFromLeft (100));
+        on.setBounds (top.removeFromLeft (80));
+        r.removeFromTop (12);
+        auto a = r.removeFromTop (30);
+        amountLabel.setBounds (a.removeFromLeft (80));
+        amount.setBounds (a);
+        r.removeFromTop (10);
+        auto l = r.removeFromTop (30);
+        lengthLabel.setBounds (l.removeFromLeft (80));
+        length.setBounds (l.getWidth() > 200 && dynamic_cast<juce::ComboBox*> (&length) != nullptr ? l.removeFromLeft (160) : l);
+    }
+
+    void send()
+    {
+        drb::MasterSettings m;
+        m.volumeDb = (float) volume.getValue();
+        m.reverb = { reverbOn.getToggleState(), (float) reverbAmount.getValue() / 100.0f, (float) reverbLength.getValue() / 100.0f };
+        m.delay = { delayOn.getToggleState(), (float) delayAmount.getValue() / 100.0f, std::max (0, delayLength.getSelectedId() - 1) };
+        processor.setMaster (m);
+    }
 };
 
 // --- Export --------------------------------------------------------------
@@ -1968,7 +2165,8 @@ DrumRebuilderEditor::DrumRebuilderEditor (DrumRebuilderProcessor& p)
     tabs.addTab ("Sample Browser", theme::panel, samplePage, true);
     rackPage = new DrumRackPage (processor);
     tabs.addTab ("Drum Rack", theme::panel, rackPage, true);
-    tabs.addTab ("Master", theme::panel, new Placeholder ("Master", "Master Reverb and Delay - stage 5"), true);
+    masterPage = new MasterPage (processor);
+    tabs.addTab ("Master", theme::panel, masterPage, true);
     exportPage = new ExportPage (processor);
     tabs.addTab ("Export", theme::panel, exportPage, true);
     tabs.setTabBarDepth (32);
@@ -2217,6 +2415,7 @@ void DrumRebuilderEditor::changeListenerCallback (juce::ChangeBroadcaster*)
     midiPage->update();
     samplePage->update();
     rackPage->update();
+    masterPage->update();
     exportPage->update();
 
     if (processor.getLoadedId() != shownId)
@@ -2241,6 +2440,14 @@ void DrumRebuilderEditor::timerCallback()
     {
         lastPage = page;
         processor.setEditsAudible (page == midiPage);
+        processor.setMasterAudible (page == masterPage);
+        processor.setRebuiltAllowed (page == rackPage || page == masterPage);
+        if (page != rackPage)
+            processor.setBarLoop (false);   // the Drum Rack's loop over the bars stays there
+        // The keyboard is the editor's again (Space, arrows), not left with
+        // something on the tab just closed.
+        if (auto* f = juce::Component::getCurrentlyFocusedComponent(); f == nullptr || ! f->isShowing() || f == &tabs)
+            grabKeyboardFocus();
         if (page == midiPage)
             for (auto inst : processor.getSolo())
                 processor.setSolo (inst, false);

@@ -280,11 +280,15 @@ void WaveformView::paint (juce::Graphics& g)
         auto top = plain, bottom = plain;
         if (tint)
         {
-            // The latest-starting slice on each row wins.
+            // The latest-starting slice on each row wins. A pixel is a
+            // slice's when its middle is in it: zoomed out, the pixel at a
+            // slice's OUT also holds the next hit's loud attack, which must
+            // not look like a peak at the end of this one.
+            const double tc = t0 + 0.5 * secondsPerPx;
             const Slice* rowTop = nullptr;
             const Slice* rowBottom = nullptr;
             for (const auto& sl : slices)
-                if (sl.in < t1 && sl.out > t0)
+                if (sl.in <= tc && sl.out > tc)
                 {
                     auto*& slot = sl.row == 0 ? rowTop : rowBottom;
                     if (slot == nullptr || sl.in > slot->in)
@@ -911,7 +915,10 @@ void WaveformView::addInstrumentItems (juce::PopupMenu& menu, double t)
     juce::WeakReference<juce::Component> self (this);
     menu.addSectionHeader ("Add a marker here - it is a:");
     for (auto inst : drb::allInstruments)
-        menu.addItem (drb::instrumentName (inst), [this, self, t, inst]
+        if (instrumentMode && ! focus.empty() && ! focused (inst))
+            continue;   // with instruments on solo: one of them
+        else
+            menu.addItem (drb::instrumentName (inst), [this, self, t, inst]
         {
             if (self != nullptr)
                 processor.addHit (t, inst);
@@ -1112,9 +1119,18 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
         return;
 
     // Instruments tab: a double-click on a marker (its handle or its line)
-    // deletes it; on an empty spot it adds one, asking what it is.
+    // deletes it; on an empty spot it adds one, asking what it is. With
+    // instruments on solo only theirs: their markers are deleted (the other
+    // instruments' are not touched), and what is added is one of them.
     if (instrumentMode)
     {
+        const auto ownMarker = [this] (int i)
+        {
+            if (focus.empty())
+                return true;
+            const auto present = processor.getInstrumentsAt (i);
+            return std::any_of (present.begin(), present.end(), [this] (drb::Instrument inst) { return focused (inst); });
+        };
         int index = -1;
         if (findGrab (e.getPosition(), index) != Grab::hit && waveArea().contains (e.getPosition()))
         {
@@ -1128,14 +1144,31 @@ void WaveformView::mouseDoubleClick (const juce::MouseEvent& e)
                 }
         }
         grab = Grab::none;
-        if (index >= 0)
+        // Another instrument's marker (not on solo) is left alone.
+        if (index >= 0 && ownMarker (index))
         {
             clearSelection();
-            processor.deleteHit (index);
+            if (focus.empty())
+                processor.deleteHit (index);
+            else
+            {
+                const double t = processor.getAnalysis().onsets[(size_t) index].time;
+                std::vector<std::pair<double, drb::Instrument>> gone;
+                for (auto inst : processor.getInstrumentsAt (index))
+                    if (focused (inst))
+                        gone.push_back ({ t, inst });
+                processor.removeInstruments (gone);
+            }
             hoverMarker = -1;
         }
-        else if (e.y >= waveArea().getY())
-            showAddMenu (juce::jlimit (0.0, duration, xToSeconds ((float) e.x)));
+        else if (index < 0 && e.y >= waveArea().getY())
+        {
+            const double t = juce::jlimit (0.0, duration, xToSeconds ((float) e.x));
+            if (focus.size() == 1)
+                processor.addHit (t, focus.front());
+            else
+                showAddMenu (t);
+        }
         repaint();
         return;
     }

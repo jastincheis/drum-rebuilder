@@ -51,7 +51,7 @@ private:
 
     int selected = -1;        // index into the hits
     std::vector<int> picked;  // several hits selected (indices into the hits)
-    std::vector<float> pickedStart;   // their velocities when a drag began
+    std::vector<float> pickedStart;   // their changes (dB) when a drag began
     int pickAnchor = -1;      // the last hit Ctrl / Shift + clicked
     size_t shownHitCount = 0;
     bool boxing = false;
@@ -65,7 +65,7 @@ private:
     double lastPlayhead = -1.0;
     int hoverHit = -1;
     bool hitPreviewing = false;
-    float velocityAtStart = 0.0f;
+    float changeAtStart = 0.0f;   // dB
     bool grabbedAbove = true;   // velocity drag: by the top (flag) or the bottom   // a hit's bar loops while its loudness is dragged
 
     std::vector<drb::Instrument> lanes;   // rows, top to bottom
@@ -81,6 +81,8 @@ private:
     float secondsToX (double s) const;
     double place (double seconds, bool free) const;   // snapped unless free
     juce::Rectangle<float> hitBox (int index) const;
+    juce::Rectangle<float> barAt (int index, float db) const;   // its bar at that level
+    float dbPerPixel (int lane) const;
     juce::Rectangle<int> soloButton (int lane) const;
     bool onVelocityEdge (int index, juce::Point<int>) const;
     juce::Rectangle<float> volumeFlag (int index) const;

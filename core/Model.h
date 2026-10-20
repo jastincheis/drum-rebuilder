@@ -59,6 +59,8 @@ struct Hit
     // played that much louder or softer.
     float soundVelocity = -1.0f;
     float soundGain() const { return soundVelocity > 0.0f ? velocity / soundVelocity : 1.0f; }
+    // How hard its sound was really played (its velocity before any change).
+    float recordedVelocity() const { return soundVelocity > 0.0f ? soundVelocity : velocity; }
 
     double sourceTime() const { return source >= 0.0 ? source : time; }
 

@@ -6,6 +6,7 @@
 
 #include "Analyzer.h"
 #include "AudioFile.h"
+#include "Effects.h"
 #include "Metronome.h"
 #include "Midi.h"
 #include "HitGains.h"
@@ -289,6 +290,23 @@ void checkRebuild()
         const bool originalCut = cutOriginal.getMagnitude (0, s0 + (int) (0.031 * sr), kb - s0 - (int) (0.031 * sr)) < 1.0e-4f
                                  && cutOriginal.getMagnitude (0, s0, (int) (0.02 * sr)) > 0.01f;
         check (toneCut && originalCut, "a sound length cuts the sound there (folder sounds and originals)");
+
+        // An IN: the sound from there on starts at the hit (the part before
+        // is skipped), and still stops at its OUT.
+        RebuildSettings late;
+        late.instruments[(size_t) Instrument::Kick] = { PickMode::Fixed, { tone }, 0, 0.1, 0.04 };
+        const auto skipped = renderRebuild (one, late, sr, 0.5);
+        const bool startsAtHit = skipped.getMagnitude (0, t0 + (int) (0.005 * sr), (int) (0.03 * sr)) > 0.05f
+                                 && skipped.getMagnitude (0, t0 + (int) (0.062 * sr), (int) (0.1 * sr)) < 1.0e-4f;
+        RebuildSettings lateOriginal;
+        lateOriginal.instruments[(size_t) Instrument::Kick].startAt = 0.01;
+        const auto skippedOriginal = renderRebuild (one, lateOriginal, sr, 0.5);
+        const auto whole0 = renderRebuild (one, RebuildSettings(), sr, 0.5);
+        // Its sample 10 ms in now plays at the hit (past the 2 ms fade-in).
+        const int k = s0 + (int) (0.01 * sr) + (int) (0.004 * sr);
+        const bool originalShifted = std::abs (skippedOriginal.getSample (0, (int) (one.hits[0].time * sr) + (int) (0.004 * sr))
+                                               - whole0.getSample (0, k)) < 0.02f;
+        check (startsAtHit && originalShifted, "a sound's IN: from there on, at the hit (folder sounds and originals)");
     }
 
     // 4. Saving the originals into folders, and again (replaces them).
@@ -612,6 +630,14 @@ void checkHitGains()
     check (tone (hatSolo, 9000.0, 0.52) > 0.9 * hat1 && tone (hatSolo, 60.0, 0.52) < 0.1 * kick1
                && tone (hatSolo, 9000.0, 0.65) > 0.9 * hat2 && tone (hatSolo, 60.0, 0.65) < 0.1 * kick2,
            "solo hi-hat: the hi-hats, no kick");
+    // The same with each hit's IN / OUT (the kick's OUT where the lone
+    // hi-hat starts): the kick still rings on under it.
+    {
+        const std::vector<juce::Range<double>> cuts { { 0.5, 0.598 }, { 0.501, 0.598 }, { 0.6, 0.9 } };
+        const auto kickCut = applyHitGains (bands, hits, &onlyKick, &cuts);
+        check (tone (kickCut, 60.0, 0.65) > 0.9 * kick2 && tone (kickCut, 9000.0, 0.65) < 0.1 * hat2,
+               "solo kick with OUTs: the kick rings on under a hi-hat after it");
+    }
 
     // A kick moved away by hand: its old place no longer sounds.
     hits = { { 0.7, Instrument::Kick, 0.8f, 1.0f, true } };
@@ -640,6 +666,83 @@ void checkHitGains()
     check (tone (ksSnare, 60.0, 0.52) < 0.1 * tone (ks, 60.0, 0.52) && tone (ksSnare, 1000.0, 0.52) > 0.9 * tone (ks, 1000.0, 0.52)
                && tone (ksSnare, 9000.0, 0.52) > 0.9 * tone (ks, 9000.0, 0.52),
            "solo snare on a kick + snare: no kick");
+
+    // A snare with a low body (100 Hz) long after a kick: the kick's lows
+    // no longer ring there, so a kick solo leaves the snare out.
+    juce::AudioBuffer<float> late (1, (int) sr);
+    for (int i = 0; i < late.getNumSamples(); ++i)
+    {
+        const double t = i / sr, w = 2.0 * juce::MathConstants<double>::pi * t;
+        const float kickEnv = t >= 0.1 ? (float) std::exp (-(t - 0.1) * 20.0) : 0.0f;
+        const float snareEnv = t >= 0.7 ? (float) std::exp (-(t - 0.7) * 8.0) : 0.0f;
+        late.setSample (0, i, kickEnv * 0.4f * (float) std::sin (w * 60.0)
+                              + snareEnv * (0.4f * (float) std::sin (w * 100.0) + 0.3f * (float) std::sin (w * 1000.0)));
+    }
+    const auto lateBands = splitBands (late, sr);
+    hits = { { 0.1, Instrument::Kick, 0.8f, 1.0f, true }, { 0.7, Instrument::Snare, 0.8f, 1.0f, true } };
+    const auto lateKick = applyHitGains (lateBands, hits, &onlyKick);
+    check (tone (lateKick, 100.0, 0.72) < 0.1 * tone (late, 100.0, 0.72),
+           "solo kick: a snare's lows long after the kick are left out");
+
+    // A kick at 0.1 s cut at 0.3 s and a sound without a marker at 0.4 s:
+    // on kick solo it is not heard, the kick before its OUT is.
+    juce::AudioBuffer<float> unmarked (1, (int) sr);
+    for (int i = 0; i < unmarked.getNumSamples(); ++i)
+    {
+        const double t = i / sr, w = 2.0 * juce::MathConstants<double>::pi * t;
+        const float kickEnv = t >= 0.1 ? (float) std::exp (-(t - 0.1) * 5.0) : 0.0f;
+        const float otherEnv = t >= 0.4 ? (float) std::exp (-(t - 0.4) * 8.0) : 0.0f;
+        unmarked.setSample (0, i, kickEnv * 0.3f * (float) std::sin (w * 60.0) + otherEnv * 0.4f * (float) std::sin (w * 1000.0));
+    }
+    const auto unmarkedBands = splitBands (unmarked, sr);
+    hits = { { 0.1, Instrument::Kick, 0.8f, 1.0f, true }, { 0.9, Instrument::Snare, 0.8f, 1.0f, true } };
+    const std::vector<juce::Range<double>> sounds { { 0.1, 0.3 }, { 0.9, 1.0 } };
+    const auto cut = applyHitGains (unmarkedBands, hits, &onlyKick, &sounds);
+    check (tone (cut, 60.0, 0.2) > 0.9 * tone (unmarked, 60.0, 0.2) && tone (cut, 1000.0, 0.45) < 0.01 * tone (unmarked, 1000.0, 0.45),
+           "solo kick: the kick up to its OUT, nothing after it until the next hit");
+}
+
+// The Master: volume, a delay synced to the tempo, a reverb tail; off =
+// untouched, and its settings survive being saved.
+void checkMaster()
+{
+    const double sr = 48000.0;
+    juce::AudioBuffer<float> click (2, (int) (2.0 * sr));
+    click.clear();
+    for (int ch = 0; ch < 2; ++ch)
+        click.setSample (ch, (int) (0.1 * sr), 0.5f);
+
+    auto copy = click;
+    applyMaster (copy, sr, 120.0, MasterSettings {});
+    check (std::abs (copy.getSample (0, (int) (0.1 * sr)) - 0.5f) < 1.0e-6f && copy.getMagnitude (0, (int) (0.2 * sr), (int) sr) < 1.0e-9f,
+           "master off: the beat as it is");
+
+    MasterSettings quieter;
+    quieter.volumeDb = -6.0f;
+    copy = click;
+    applyMaster (copy, sr, 120.0, quieter);
+    check (std::abs (copy.getSample (0, (int) (0.1 * sr)) - 0.25f) < 0.01f, "master volume -6 dB halves it");
+
+    // 1/8 at 120 BPM = 0.25 s: the first echo 0.25 s after the click.
+    MasterSettings echo;
+    echo.delay = { true, 0.5f, 4 };
+    copy = click;
+    applyMaster (copy, sr, 120.0, echo);
+    const int at = (int) (0.35 * sr);
+    check (copy.getMagnitude (0, at - 200, 400) > 0.02f && copy.getMagnitude (0, (int) (0.2 * sr), (int) (0.1 * sr)) < 1.0e-6f,
+           "delay 1/8 at 120 BPM: an echo 0.25 s later, nothing before it");
+
+    MasterSettings hall;
+    hall.reverb = { true, 0.5f, 0.8f };
+    copy = click;
+    applyMaster (copy, sr, 120.0, hall);
+    check (copy.getMagnitude (0, (int) (0.5 * sr), (int) (0.2 * sr)) > 1.0e-4f, "reverb: the click rings on");
+
+    echo.reverb = { false, 0.7f, 0.3f };   // off, settings kept
+    const auto back = MasterSettings::fromString (echo.toString());
+    check (back.delay.on && back.delay.length == 4 && std::abs (back.delay.amount - 0.5f) < 1.0e-3f && ! back.reverb.on
+               && std::abs (back.reverb.amount - 0.7f) < 1.0e-3f && std::abs (back.reverb.length - 0.3f) < 1.0e-3f,
+           "master settings saved and read back (an effect off keeps its settings)");
 }
 
 // A marker put by hand lands on the start of the sound near it.
@@ -679,6 +782,7 @@ int main (int argc, char** argv)
     checkRebuild();
     checkHitGains();
     checkFindAttack();
+    checkMaster();
     runAnalysis (writeDir);
 
     std::printf ("%s (%d failed checks)\n", failures == 0 ? "OK" : "FAILED", failures);

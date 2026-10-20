@@ -3,6 +3,7 @@
 #include "Analyzer.h"
 #include "HitGains.h"
 #include "AudioFile.h"
+#include "Effects.h"
 #include "Midi.h"
 #include "Rebuild.h"
 #include "Samples.h"
@@ -101,10 +102,20 @@ public:
     // only where they are made, in the MIDI editor; elsewhere the recording
     // plays as it was. Solo follows the same.
     void setEditsAudible (bool);
+    // The Master's effects are heard only on the Master tab; elsewhere B is
+    // the rebuilt beat without them.
+    void setMasterAudible (bool);
     bool areEditsAudible() const { return editsAudible; }
 
-    // How loud one hit sounds: the peak of its sound, in dBFS (-100 = silent).
+    // How loud one hit sounds: the peak of its sound, in dBFS (-100 = silent);
+    // as the recording has it; and the change made by hand (dB, 0 = none).
     float getHitLevelDb (int hitIndex) const;
+    float getHitOriginalDb (int hitIndex) const;
+    float getHitChangeDb (int hitIndex) const;
+    // Several hits made louder / softer than in the recording: (index, dB
+    // against the recording, from -40 to +12).
+    void setHitChangesDb (const std::vector<std::pair<int, float>>&, bool undoStep = true);
+    static constexpr float minChangeDb = -40.0f, maxChangeDb = 12.0f;
     // While a hit's loudness is being dragged: it plays in a loop, and
     // the change is heard as it goes. End puts the transport back.
     void startHitPreview (int hitIndex);
@@ -204,10 +215,16 @@ public:
 
     bool getKeepPitch() const { return keepPitch; }
     void setKeepPitch (bool);
-    // How long an instrument's sound plays from each hit, at most (seconds,
-    // 0 = all of it). Saved with the beat.
+    // Which part of an instrument's sound plays at each hit: from IN (0 =
+    // its start) to OUT (0 = its end), seconds into the sound. Saved with
+    // the beat; back to all of it when the row gets another sound.
     double getSoundLength (drb::Instrument i) const { return soundLengths[(size_t) i]; }
-    void setSoundLength (drb::Instrument, double seconds);
+    double getSoundStart (drb::Instrument i) const { return soundIns[(size_t) i]; }
+    void setSoundRange (drb::Instrument, double in, double out);
+    // The Master (volume, reverb, delay) on the rebuilt beat (B) and its
+    // export. Saved with the beat.
+    const drb::MasterSettings& getMaster() const { return master; }
+    void setMaster (const drb::MasterSettings&);
     // The sound a Drum Rack row plays now: its chosen sound, or (originals)
     // its loudest hit cut from the recording. Null = none.
     drb::SamplePtr getRowSound (drb::Instrument) const;
@@ -218,6 +235,9 @@ public:
     // A/B: what the transport plays, the recording or the rebuilt beat.
     bool isListeningRebuilt() const { return listenRebuilt; }
     void setListeningRebuilt (bool);
+    // B is heard only where it is chosen (Drum Rack, Master); the other
+    // tabs always play the recording. The choice is kept for coming back.
+    void setRebuiltAllowed (bool);
     bool isRendering() const { return rendering; }
     // Drum Rack: the beat goes round and round over its whole bars, so
     // the sounds can be changed while it plays. Off = the loop as before.
@@ -242,7 +262,11 @@ private:
 
     drb::SampleLibrary library { drb::SampleLibrary::defaultRoot() };
     std::array<drb::PickMode, drb::numInstruments> pickModes {};
-    std::array<double, drb::numInstruments> soundLengths {};
+    std::array<double, drb::numInstruments> soundLengths {}, soundIns {};
+    drb::MasterSettings master;
+    juce::String rowSoundId (drb::Instrument) const;   // which sound a row plays (its IN / OUT belong to it)
+    void forgetRangesOfChangedRows (const std::array<juce::String, drb::numInstruments>& before);
+    std::array<juce::String, drb::numInstruments> rowSoundIds() const;
     std::array<juce::File, drb::numInstruments> fixedFiles;
     std::array<bool, drb::numInstruments> changing = [] { std::array<bool, drb::numInstruments> a; a.fill (true); return a; }();
     struct SoundSet
@@ -258,10 +282,13 @@ private:
     void applySounds (const SoundSet&);
     void rememberSounds();   // the sounds now, at soundPos, if they changed by hand
     bool keepPitch = false, listenRebuilt = false, rendering = false;
+    bool wantRebuilt = false, rebuiltAllowed = true;   // the A / B choice; this tab may play B
     double tempoFactor = 1.0;
     juce::uint32 seed = 1;
     int renderGeneration = 0;
     std::unique_ptr<juce::AudioBuffer<float>> originalAtDevice, rebuiltAtDevice;
+    std::unique_ptr<juce::AudioBuffer<float>> masteredAtDevice;   // the same with the Master (null = no Master set)
+    bool masterAudible = false;
     juce::ValueTree pendingRebuild;   // from the saved state, until that file is loaded
 
     int memoryGeneration = 0;
@@ -285,6 +312,7 @@ private:
     std::unique_ptr<juce::AudioBuffer<float>> originalWithGains() const;
     bool editsAudible = false;
     std::vector<drb::Hit> audibleHits() const;   // the hits as they sound now (edits or not)
+    std::vector<juce::Range<double>> hitSounds (const std::vector<drb::Hit>&) const;   // where each one's sound is in the recording (IN / OUT)
     void addHandHits (juce::AudioBuffer<float>&, const drb::InstrumentGains* only) const;
     int originalGeneration = 0;
     mutable std::unique_ptr<drb::Bands> bands;   // the recording at the device rate, split; made when first needed
@@ -308,6 +336,11 @@ private:
     int loadGeneration = 0;   // a newer load makes older results stale
     int loadedId = 0;
     mutable std::map<juce::int64, double> soundStarts;   // by onset time in microseconds
+    // Each hit's level as the recording has it, worked out again when the
+    // hits' places change (not when only their loudness does).
+    mutable std::vector<float> originalDb;
+    mutable std::vector<std::tuple<double, int, bool>> originalDbKey;
+    mutable const void* originalDbBands = nullptr;
     mutable int soundStartsId = -1;
     double preparedRate = 0.0;
 

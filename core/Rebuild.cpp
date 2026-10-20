@@ -24,6 +24,7 @@ namespace
 {
 constexpr double fadeInSeconds = 0.002, fadeOutSeconds = 0.010;
 constexpr double lengthFadeSeconds = 0.015;   // where a sound is cut short (InstrumentPlan::maxLength)
+constexpr double startFadeSeconds = 0.002;    // where a sound starts later than it does (InstrumentPlan::startAt)
 
 // Adds src[from, to) into `out`, starting at `startSeconds`, read `pitch`
 // times faster (2 = an octave up, and half as long), with a gain and an
@@ -89,12 +90,15 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
         const int b = std::clamp ((int) std::ceil (input.slices[h].second * sr), a, src.getNumSamples());
         return std::pair { a, b };
     };
-    // The same, cut short at the instrument's length (from the hit).
+    // The same, from the instrument's IN to its OUT (both from the hit).
     auto playedRange = [&] (size_t h)
     {
         auto [a, b] = range (h);
-        if (const double len = settings.instruments[(size_t) hits[h].instrument].maxLength; len > 0.0)
-            b = std::clamp ((int) std::ceil ((hits[h].sourceTime() + len) * sr), a, b);
+        const auto& plan = settings.instruments[(size_t) hits[h].instrument];
+        if (plan.maxLength > 0.0)
+            b = std::clamp ((int) std::ceil ((hits[h].sourceTime() + plan.maxLength) * sr), a, b);
+        if (plan.startAt > 0.0)
+            a = std::clamp ((int) std::floor ((hits[h].sourceTime() + plan.startAt) * sr), a, b);
         return std::pair { a, b };
     };
 
@@ -105,7 +109,7 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
     {
         int loudest = -1;
         for (size_t h = 0; h < hits.size(); ++h)
-            if (hits[h].instrument == inst && (loudest < 0 || hits[h].velocity > hits[(size_t) loudest].velocity))
+            if (hits[h].instrument == inst && (loudest < 0 || hits[h].recordedVelocity() > hits[(size_t) loudest].recordedVelocity()))
                 loudest = (int) h;
         if (loudest < 0)
             continue;
@@ -115,7 +119,7 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
         juce::AudioBuffer<float> slice (src.getNumChannels(), b - a);
         for (int ch = 0; ch < src.getNumChannels(); ++ch)
             slice.copyFrom (ch, 0, src, ch, a, b - a);
-        refPeak[(size_t) inst] = slice.getMagnitude (0, b - a) / std::max (0.05f, hits[(size_t) loudest].velocity);
+        refPeak[(size_t) inst] = slice.getMagnitude (0, b - a) / std::max (0.05f, hits[(size_t) loudest].recordedVelocity());
         refPitch[(size_t) inst] = estimatePitch (slice, sr, inst);
     }
 
@@ -146,11 +150,13 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
             }
 
             int a = src.getNumSamples(), b = 0;
+            double startAt = 1.0e9;   // the IN of the one starting earliest
             for (auto g : group)
             {
                 const auto [ga, gb] = playedRange (g);
                 a = std::min (a, ga);
                 b = std::max (b, gb);
+                startAt = std::min (startAt, settings.instruments[(size_t) hits[g].instrument].startAt);
                 done[g] = true;
             }
             if (b - a < 4)
@@ -166,7 +172,8 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
                     envelope[(size_t) (i - a)] = std::max (envelope[(size_t) (i - a)],
                                                            gate (i, ga, gb, fadeIn, out) * hits[g].soundGain());
             }
-            const double start = hit.time / f + (a / sr - hit.sourceTime());
+            // Started later (IN): what is left begins at the hit.
+            const double start = hit.time / f + (a / sr - hit.sourceTime()) - startAt;
             addVoice (out, outputRate, start, src, sr, a, b, 1.0, 1.0f, &envelope);
             continue;
         }
@@ -203,18 +210,23 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
         if (settings.keepPitch && refPitch[(size_t) hit.instrument] > 0.0f && sample.pitch > 0.0f)
             pitch = std::clamp ((double) refPitch[(size_t) hit.instrument] / sample.pitch, 0.5, 2.0);
 
-        // Cut short at the instrument's length, with a short fade.
+        // From the instrument's IN to its OUT, with short fades there.
         int end = sample.audio.getNumSamples();
-        std::vector<float> fade;
         if (plan.maxLength > 0.0 && plan.maxLength * sample.sampleRate < end)
-        {
             end = std::max (1, (int) std::ceil (plan.maxLength * sample.sampleRate));
-            const int n = std::min (end, (int) (lengthFadeSeconds * sample.sampleRate));
-            fade.assign ((size_t) end, 1.0f);
-            for (int i = 0; i < n; ++i)
-                fade[(size_t) (end - 1 - i)] = (float) i / (float) n;
+        const int begin = std::clamp ((int) std::floor (plan.startAt * sample.sampleRate), 0, std::max (0, end - 4));
+        std::vector<float> fade;
+        if (end < sample.audio.getNumSamples() || begin > 0)
+        {
+            fade.assign ((size_t) (end - begin), 1.0f);
+            if (end < sample.audio.getNumSamples())
+                for (int i = 0, fadeLen = std::min (end - begin, (int) (lengthFadeSeconds * sample.sampleRate)); i < fadeLen; ++i)
+                    fade[(size_t) (end - begin - 1 - i)] = (float) i / (float) fadeLen;
+            if (begin > 0)
+                for (int i = 0, fadeLen = std::min (end - begin, (int) (startFadeSeconds * sample.sampleRate)); i < fadeLen; ++i)
+                    fade[(size_t) i] *= (float) i / (float) fadeLen;
         }
-        addVoice (out, outputRate, hit.time / f, sample.audio, sample.sampleRate, 0, end, pitch, gain, fade.empty() ? nullptr : &fade);
+        addVoice (out, outputRate, hit.time / f, sample.audio, sample.sampleRate, begin, end, pitch, gain, fade.empty() ? nullptr : &fade);
     }
 
     // Never clips: louder sounds than the original's add up, so the whole

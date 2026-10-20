@@ -32,8 +32,12 @@ using InstrumentGains = std::array<float, numInstruments>;
 // The recording with every hit's loudness change (Hit::soundGain), times
 // its instrument's gain, from the bands. A moved hit is taken out where it
 // was; moved and added hits themselves are not in it (they are mixed in
-// from their sounds, see Rebuild).
-juce::AudioBuffer<float> applyHitGains (const Bands&, const std::vector<Hit>&, const InstrumentGains* = nullptr);
+// from their sounds, see Rebuild). `sounds` (one per hit, optional): where
+// each hit's sound is in the recording (IN to OUT). A change begins at its
+// IN, a little before its time, so no bit of the attack slips through; on
+// solo nothing plays after the OUT until the next hit.
+juce::AudioBuffer<float> applyHitGains (const Bands&, const std::vector<Hit>&, const InstrumentGains* = nullptr,
+                                        const std::vector<juce::Range<double>>* sounds = nullptr);
 
 // How loud one hit sounds with its change: the peak of its own band(s) from
 // it to the next hit, in dBFS (-100 = silent).

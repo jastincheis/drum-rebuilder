@@ -10,6 +10,7 @@ class InstrumentsPage;
 class MidiEditorPage;
 class SampleBrowserPage;
 class DrumRackPage;
+class MasterPage;
 class ExportPage;
 
 class DrumRebuilderEditor : public juce::AudioProcessorEditor,
@@ -50,6 +51,7 @@ private:
     MidiEditorPage* midiPage = nullptr;     // owned by tabs
     SampleBrowserPage* samplePage = nullptr;   // owned by tabs
     DrumRackPage* rackPage = nullptr;          // owned by tabs
+    MasterPage* masterPage = nullptr;          // owned by tabs
     ExportPage* exportPage = nullptr;       // owned by tabs
 
     std::unique_ptr<OpenPanel> openPanel;   // the Open panel, while shown

@@ -104,13 +104,36 @@ int MidiEditorView::hitAt (juce::Point<int> p) const
     return best;
 }
 
-// A hit's bar: taller (from the row's middle out) the harder it is hit.
-juce::Rectangle<float> MidiEditorView::hitBox (int index) const
+// A hit's bar: taller (from the row's middle out) the louder it sounds, on
+// the same dB scale in every row: hits as loud look the same.
+namespace
+{
+constexpr float quietestDb = -40.0f, loudestDb = 0.0f;   // the bar's smallest / full height
+constexpr float barMin = 0.15f, barRange = 0.75f;        // of the row's height
+
+float barFraction (float db)
+{
+    return barMin + barRange * juce::jlimit (0.0f, 1.1f, (db - quietestDb) / (loudestDb - quietestDb));
+}
+} // namespace
+
+juce::Rectangle<float> MidiEditorView::barAt (int index, float db) const
 {
     const auto& h = processor.getAnalysis().hits[(size_t) index];
     const auto r = laneBounds (laneOf (h.instrument));
-    const float height = (float) r.getHeight() * (0.25f + 0.6f * h.velocity);
+    const float height = (float) r.getHeight() * barFraction (db);
     return { secondsToX (h.time) - 1.0f, (float) r.getCentreY() - height / 2.0f, 9.0f, height };
+}
+
+juce::Rectangle<float> MidiEditorView::hitBox (int index) const
+{
+    return barAt (index, processor.getHitLevelDb (index));
+}
+
+// dB per pixel the bar's edge is dragged (it grows both ways from the middle).
+float MidiEditorView::dbPerPixel (int lane) const
+{
+    return 2.0f * (loudestDb - quietestDb) / (barRange * (float) laneBounds (lane).getHeight());
 }
 
 juce::Rectangle<int> MidiEditorView::soloButton (int lane) const
@@ -304,8 +327,18 @@ void MidiEditorView::paint (juce::Graphics& g)
         const auto box = hitBox ((int) i);
         const auto colour = theme::instrument (h.instrument);
         const bool muted = anySolo && ! processor.isSolo (h.instrument);
-        g.setColour (colour.withAlpha (muted ? 0.15f : 0.45f + 0.55f * h.velocity));
+        const float loud = juce::jlimit (0.0f, 1.0f, (processor.getHitLevelDb ((int) i) - quietestDb) / (loudestDb - quietestDb));
+        g.setColour (colour.withAlpha (muted ? 0.15f : 0.45f + 0.55f * loud));
         g.fillRoundedRectangle (box, 2.0f);
+
+        // Changed by hand: a line where its top / bottom were in the recording.
+        if (std::abs (processor.getHitChangeDb ((int) i)) > 0.05f)
+        {
+            const auto was = barAt ((int) i, processor.getHitOriginalDb ((int) i));
+            g.setColour (juce::Colours::white.withAlpha (muted ? 0.25f : 0.8f));
+            g.drawHorizontalLine ((int) was.getY(), was.getX() - 3.0f, was.getRight() + 3.0f);
+            g.drawHorizontalLine ((int) was.getBottom(), was.getX() - 3.0f, was.getRight() + 3.0f);
+        }
 
         // Its volume flag: a little tab on a stem.
         const auto flag = volumeFlag ((int) i);
@@ -339,8 +372,14 @@ void MidiEditorView::paint (juce::Graphics& g)
     const int shown = dragHit >= 0 && velocityDrag ? dragHit : hoverHit >= 0 ? hoverHit : selected;
     if (juce::isPositiveAndBelow (shown, (int) hits.size()) && laneOf (hits[(size_t) shown].instrument) >= 0)
     {
-        const float db = processor.getHitLevelDb (shown);
-        const auto text = db <= -99.0f ? juce::String ("silent") : juce::String (db, 1) + " dB";
+        // Now, as in the recording, and the change: "-6.2 dB  (original -4.1, -2.1 dB)".
+        const float db = processor.getHitLevelDb (shown), change = processor.getHitChangeDb (shown);
+        auto signedDb = [] (float v) { return (v > 0.0f ? "+" : "") + juce::String (v, 1) + " dB"; };
+        auto text = db <= -99.0f ? juce::String ("silent") : juce::String (db, 1) + " dB";
+        if (std::abs (change) > 0.05f)
+            text << "  (original " << juce::String (processor.getHitOriginalDb (shown), 1) << ", " << signedDb (change) << ")";
+        else if (db > -99.0f)
+            text << "  (original)";
         const auto box = hitBox (shown);
         g.setFont (juce::FontOptions (12.0f, juce::Font::bold));
         const float w = (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), text) + 12.0f;
@@ -451,11 +490,11 @@ void MidiEditorView::mouseDown (const juce::MouseEvent& e)
         selected = dragHit = hit;
         dragOffset = xToSeconds ((float) e.x) - processor.getAnalysis().hits[(size_t) hit].time;
         velocityDrag = onVelocityEdge (hit, e.getPosition());
-        velocityAtStart = processor.getAnalysis().hits[(size_t) hit].velocity;
+        changeAtStart = processor.getHitChangeDb (hit);
         grabbedAbove = (float) e.y < hitBox (hit).getCentreY();
         pickedStart.clear();
         for (int i : picked)
-            pickedStart.push_back (processor.getAnalysis().hits[(size_t) i].velocity);
+            pickedStart.push_back (processor.getHitChangeDb (i));
     }
     else if (const int lane = laneAt (e.y); lane >= 0 && e.x >= laneArea().getX() && e.getNumberOfClicks() == 1)
     {
@@ -496,21 +535,17 @@ void MidiEditorView::mouseDrag (const juce::MouseEvent& e)
             processor.startHitPreview (dragHit);
         }
         // Away from the row's middle = louder: the bar's edge follows the
-        // mouse from where it was grabbed (the flag too). Shift = finer.
-        const auto r = laneBounds (laneOf (processor.getAnalysis().hits[(size_t) dragHit].instrument));
+        // mouse from where it was grabbed (the flag too), in dB. Shift = finer.
+        const int lane = laneOf (processor.getAnalysis().hits[(size_t) dragHit].instrument);
         const float moved = (float) (grabbedAbove ? -e.getDistanceFromDragStartY() : e.getDistanceFromDragStartY());
-        const float perPixel = 1.0f / (0.3f * (float) r.getHeight()) * (e.mods.isShiftDown() ? 0.25f : 1.0f);
-        const float delta = moved * perPixel;
+        const float delta = moved * dbPerPixel (lane) * (e.mods.isShiftDown() ? 0.25f : 1.0f);
+        std::vector<std::pair<int, float>> changes;
         if (picked.size() > 1 && isPicked (dragHit) && pickedStart.size() == picked.size())
-        {
-            // All the selected ones, by the same amount.
-            std::vector<std::pair<int, float>> changes;
-            for (size_t k = 0; k < picked.size(); ++k)
+            for (size_t k = 0; k < picked.size(); ++k)   // all the selected ones, by the same dB
                 changes.push_back ({ picked[k], pickedStart[k] + delta });
-            processor.setHitVelocities (changes, false);
-        }
         else
-            processor.setHitVelocity (dragHit, juce::jlimit (0.05f, 1.0f, velocityAtStart + delta), false);
+            changes.push_back ({ dragHit, changeAtStart + delta });
+        processor.setHitChangesDb (changes, false);
         repaint();
         return;
     }
@@ -594,13 +629,15 @@ void MidiEditorView::showHitMenu (int hit)
 {
     juce::PopupMenu menu;
     juce::WeakReference<juce::Component> self (this);
-    const float now = processor.getAnalysis().hits[(size_t) hit].velocity;
-    menu.addSectionHeader ("How hard: " + juce::String (juce::roundToInt (now * 100.0f)) + " %");
-    for (int percent : { 100, 75, 50, 25 })
-        menu.addItem (juce::String (percent) + " %", [this, self, hit, percent]
+    const float change = processor.getHitChangeDb (hit);
+    menu.addSectionHeader ("Volume: " + juce::String (processor.getHitLevelDb (hit), 1) + " dB"
+                           + (std::abs (change) > 0.05f ? "  (" + juce::String (change, 1) + " dB)" : juce::String()));
+    for (float db : { 6.0f, 3.0f, 0.0f, -3.0f, -6.0f, -12.0f })
+        menu.addItem (db == 0.0f ? juce::String ("As in the recording") : (db > 0.0f ? "+" : "") + juce::String ((int) db) + " dB",
+                      [this, self, hit, db]
         {
             if (self != nullptr)
-                processor.setHitVelocity (hit, (float) percent / 100.0f);
+                processor.setHitChangesDb ({ { hit, db } });
         });
     menu.addSeparator();
     menu.addItem ("Delete", [this, self, hit]
@@ -619,23 +656,27 @@ void MidiEditorView::showPickedMenu()
 {
     juce::PopupMenu menu;
     juce::WeakReference<juce::Component> self (this);
-    const auto setAll = [this, self] (std::function<float (float)> f)
+    const auto setAll = [this, self] (std::function<float (float, float)> f)
     {
         if (self == nullptr)
             return;
+        // f: (its level now, its change) -> its new change, all in dB.
         std::vector<std::pair<int, float>> changes;
         for (int i : picked)
             if (juce::isPositiveAndBelow (i, (int) processor.getAnalysis().hits.size()))
-                changes.push_back ({ i, f (processor.getAnalysis().hits[(size_t) i].velocity) });
-        processor.setHitVelocities (changes);
+                changes.push_back ({ i, f (processor.getHitLevelDb (i), processor.getHitChangeDb (i)) });
+        processor.setHitChangesDb (changes);
     };
     menu.addSectionHeader (juce::String ((int) picked.size()) + " hits selected");
-    menu.addItem ("Louder (+10 %)", [setAll] { setAll ([] (float v) { return v + 0.1f; }); });
-    menu.addItem ("Quieter (-10 %)", [setAll] { setAll ([] (float v) { return v - 0.1f; }); });
-    juce::PopupMenu same;
-    for (int percent : { 100, 75, 50, 25 })
-        same.addItem (juce::String (percent) + " %", [setAll, percent] { setAll ([percent] (float) { return (float) percent / 100.0f; }); });
-    menu.addSubMenu ("All as hard as", same);
+    menu.addItem ("Louder (+2 dB)", [setAll] { setAll ([] (float, float c) { return c + 2.0f; }); });
+    menu.addItem ("Quieter (-2 dB)", [setAll] { setAll ([] (float, float c) { return c - 2.0f; }); });
+    menu.addItem ("As in the recording", [setAll] { setAll ([] (float, float) { return 0.0f; }); });
+    if (juce::isPositiveAndBelow (selected, (int) processor.getAnalysis().hits.size()))
+    {
+        const float target = processor.getHitLevelDb (selected);
+        menu.addItem ("All as loud as this one (" + juce::String (target, 1) + " dB)",
+                      [setAll, target] { setAll ([target] (float now, float c) { return c + target - now; }); });
+    }
     menu.addSeparator();
     menu.addItem ("Delete them", [this, self]
     {

@@ -13,6 +13,7 @@ constexpr double lowMid = 150.0, midHigh = 5000.0;   // Hz
 constexpr double togetherSeconds = 0.03;             // hits closer than this are played together
 constexpr double leadSeconds = 0.001;                // a change starts this long before its hit
 constexpr double rampSeconds = 0.003;
+constexpr double lowRingSeconds = 0.3;              // how long a kick / tom's lows ring on
 
 enum Band { lowBand, midBand, highBand };
 
@@ -61,6 +62,8 @@ void filter (juce::AudioBuffer<float>& b, double rate, double hz, bool high)
 struct Entry
 {
     double time = 0.0;
+    double start = 0.0;   // where its sound starts (<= time)
+    double end = 1.0e9;   // and ends (its OUT)
     Instrument instrument = Instrument::Kick;
     float gain = 1.0f;
 };
@@ -68,6 +71,8 @@ struct Entry
 struct Moment
 {
     double time = 0.0;
+    double start = 0.0;   // the earliest sound start of its hits
+    double end = 0.0;     // the latest end of the ones heard
     std::array<float, 3> gain { 1.0f, 1.0f, 1.0f };
     std::vector<Entry> entries;
 };
@@ -76,19 +81,26 @@ struct Moment
 // a band follows the hit whose sound is most in it (kick + snare: the lows
 // follow the kick, the mids and highs the snare). The lows are the
 // exception: with no kick or tom there they are the last one still
-// ringing, so they keep its gain. Hits added by hand have no sound of their
+// ringing, so they keep its gain, for as long as it rings (lowRingSeconds;
+// after that the lows are the snare's or hats' own). Hits added by hand have no sound of their
 // own in the recording and are left out; a moved hit's sound is taken out
 // where it was.
-std::vector<Moment> moments (const std::vector<Hit>& hits, const InstrumentGains* instrumentGains)
+std::vector<Moment> moments (const std::vector<Hit>& hits, const InstrumentGains* instrumentGains,
+                             const std::vector<juce::Range<double>>* sounds)
 {
     std::vector<Entry> entries;
-    for (const auto& h : hits)
+    for (size_t i = 0; i < hits.size(); ++i)
     {
+        const auto& h = hits[i];
         if (h.added)
             continue;
         const float scale = instrumentGains != nullptr ? (*instrumentGains)[(size_t) h.instrument] : 1.0f;
         const bool moved = std::abs (h.sourceTime() - h.time) > 1.0e-9;
-        entries.push_back ({ h.sourceTime(), h.instrument, moved ? 0.0f : h.soundGain() * scale });
+        const double t = h.sourceTime();
+        const bool known = sounds != nullptr && i < sounds->size();
+        const double start = known ? juce::jlimit (t - 0.03, t, (*sounds)[i].getStart()) : t;
+        const double end = known ? std::max (t + 0.005, (*sounds)[i].getEnd()) : 1.0e9;
+        entries.push_back ({ t, start, end, h.instrument, moved ? 0.0f : h.soundGain() * scale });
     }
     std::stable_sort (entries.begin(), entries.end(), [] (const Entry& a, const Entry& b) { return a.time < b.time; });
 
@@ -96,13 +108,18 @@ std::vector<Moment> moments (const std::vector<Hit>& hits, const InstrumentGains
     for (const auto& e : entries)
     {
         if (out.empty() || e.time > out.back().time + togetherSeconds)
-            out.push_back ({ e.time, {}, {} });
+            out.push_back ({ e.time, e.start, 0.0, {}, {} });
+        out.back().start = std::min (out.back().start, e.start);
+        if (e.gain > 0.0f)
+            out.back().end = std::max (out.back().end, e.end);
         out.back().entries.push_back (e);
     }
 
     float lowCarry = -1.0f;
+    double lowOwnerTime = -1.0;   // the last moment with a kick or tom
     for (auto& m : out)
     {
+        bool ownsLow = false;
         for (int b = 0; b < 3; ++b)
         {
             // The strongest in this band; equally strong: the louder change.
@@ -117,10 +134,20 @@ std::vector<Moment> moments (const std::vector<Hit>& hits, const InstrumentGains
                 }
             }
             m.gain[(size_t) b] = gain;
-            if (b == lowBand && weight < 0.5f && lowCarry >= 0.0f)
-                m.gain[(size_t) b] = lowCarry;
+            if (b == lowBand)
+            {
+                ownsLow = weight >= 0.5f;
+                if (! ownsLow && lowCarry >= 0.0f && m.time - lowOwnerTime < lowRingSeconds)
+                    m.gain[(size_t) b] = lowCarry;
+            }
         }
+        if (ownsLow)
+            lowOwnerTime = m.time;
         lowCarry = m.gain[lowBand];
+        // Nothing of its own heard (solo): it lasts while a kick's lows it
+        // carries still ring, else not at all.
+        if (m.end <= 0.0)
+            m.end = m.gain[lowBand] > 0.0f && lowOwnerTime >= 0.0 ? lowOwnerTime + lowRingSeconds : m.start;
     }
     return out;
 }
@@ -149,16 +176,35 @@ bool hasHitGains (const std::vector<Hit>& hits)
     });
 }
 
-juce::AudioBuffer<float> applyHitGains (const Bands& bands, const std::vector<Hit>& hits, const InstrumentGains* instrumentGains)
+juce::AudioBuffer<float> applyHitGains (const Bands& bands, const std::vector<Hit>& hits, const InstrumentGains* instrumentGains,
+                                        const std::vector<juce::Range<double>>* sounds)
 {
     const int n = bands.low.getNumSamples(), channels = bands.low.getNumChannels();
     juce::AudioBuffer<float> out (channels, n);
     out.clear();
 
-    const auto ms = moments (hits, instrumentGains);
+    const auto ms = moments (hits, instrumentGains, sounds);
     const double rate = bands.sampleRate;
     const int ramp = std::max (1, (int) (rampSeconds * rate));
     const juce::AudioBuffer<float>* src[3] { &bands.low, &bands.mid, &bands.high };
+
+    // Where the gains change: at every moment, and on solo also at its
+    // sounds' OUT, after which nothing plays until the next one (sounds
+    // without a marker of their own are not some solo instrument's).
+    struct Change
+    {
+        double time;
+        std::array<float, 3> gain;
+    };
+    std::vector<Change> changes;
+    for (size_t k = 0; k < ms.size(); ++k)
+    {
+        changes.push_back ({ ms[k].start, ms[k].gain });
+        const double next = k + 1 < ms.size() ? ms[k + 1].start : 1.0e9;
+        const double end = std::max (ms[k].end, ms[k].start) + rampSeconds;
+        if (instrumentGains != nullptr && sounds != nullptr && end < next)
+            changes.push_back ({ end, { 0.0f, 0.0f, 0.0f } });
+    }
 
     for (int b = 0; b < 3; ++b)
     {
@@ -166,14 +212,14 @@ juce::AudioBuffer<float> applyHitGains (const Bands& bands, const std::vector<Hi
         // Before the first hit: as it is, or silent when only some play.
         float gain = instrumentGains != nullptr ? 0.0f : 1.0f;
         int from = 0;
-        for (size_t k = 0; k <= ms.size(); ++k)
+        for (size_t k = 0; k <= changes.size(); ++k)
         {
-            const int to = k < ms.size() ? juce::jlimit (from, n, (int) ((ms[k].time - leadSeconds) * rate) - ramp) : n;
+            const int to = k < changes.size() ? juce::jlimit (from, n, (int) ((changes[k].time - leadSeconds) * rate) - ramp) : n;
             for (int ch = 0; ch < channels; ++ch)
                 out.addFrom (ch, from, *src[b], ch, from, to - from, gain);
-            if (k == ms.size())
+            if (k == changes.size())
                 break;
-            const float next = ms[k].gain[(size_t) b];
+            const float next = changes[k].gain[(size_t) b];
             const int end = std::min (n, to + ramp);
             for (int ch = 0; ch < channels; ++ch)
                 out.addFromWithRamp (ch, to, src[b]->getReadPointer (ch, to), end - to, gain, next);
