@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Model.h"
+#include "../core/Model.h"
 
 #include <juce_graphics/juce_graphics.h>
 

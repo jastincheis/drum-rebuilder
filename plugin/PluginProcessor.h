@@ -1,14 +1,14 @@
 #pragma once
 
-#include "Analyzer.h"
-#include "HitGains.h"
-#include "AudioFile.h"
-#include "Effects.h"
-#include "Midi.h"
-#include "Rebuild.h"
-#include "Samples.h"
-#include "Metronome.h"
-#include "Player.h"
+#include "../core/Analyzer.h"
+#include "../core/HitGains.h"
+#include "../core/AudioFile.h"
+#include "../core/Effects.h"
+#include "../core/Midi.h"
+#include "../core/Rebuild.h"
+#include "../core/Samples.h"
+#include "../core/Metronome.h"
+#include "../core/Player.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
