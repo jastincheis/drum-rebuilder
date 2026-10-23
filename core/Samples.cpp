@@ -93,7 +93,9 @@ juce::File SampleLibrary::defaultRoot()
 void SampleLibrary::setRoot (const juce::File& r)
 {
     root = r;
-    rescan();
+    for (auto& list : lists)
+        list.clear();
+    missing = 0;
 }
 
 juce::File SampleLibrary::folderAt (int folder) const
@@ -120,7 +122,7 @@ bool SampleLibrary::writeLinks (int folder, const juce::StringArray& links) cons
     return file.replaceWithText (links.joinIntoString ("\n") + "\n");
 }
 
-void SampleLibrary::rescan()
+bool SampleLibrary::rescan (const std::function<bool (int, int)>& progress)
 {
     // What we have now, to keep the sounds that didn't change.
     std::map<juce::String, SamplePtr> before;
@@ -128,11 +130,11 @@ void SampleLibrary::rescan()
         for (const auto& s : list)
             before[s->file.getFullPathName()] = s;
 
-    missing = 0;
+    // First every folder's files, so the progress knows the total.
+    std::array<juce::Array<juce::File>, numFolders> found;
+    int stillThere = 0, total = 0;
     for (int folder = 0; folder < numFolders; ++folder)
     {
-        auto& list = lists[(size_t) folder];
-        list.clear();
         const auto dir = folderAt (folder);
         if (! dir.isDirectory())
             continue;
@@ -144,7 +146,7 @@ void SampleLibrary::rescan()
             if (f.existsAsFile())
                 files.add (f);
             else
-                ++missing;   // kept in links.txt: it may come back (a disk plugged in again)
+                ++stillThere;   // kept in links.txt: it may come back (a disk plugged in again)
         }
 
         // The user's order first, then the rest by name.
@@ -160,9 +162,22 @@ void SampleLibrary::rescan()
             };
             return rank (a) < rank (b);
         });
+        total += files.size();
+        found[(size_t) folder] = std::move (files);
+    }
 
-        for (const auto& f : files)
+    std::array<std::vector<SamplePtr>, numFolders> fresh;
+    int done = 0;
+    for (int folder = 0; folder < numFolders; ++folder)
+    {
+        auto& list = fresh[(size_t) folder];
+        const auto dir = folderAt (folder);
+        for (const auto& f : found[(size_t) folder])
         {
+            if (progress != nullptr && ! progress (done, total))
+                return false;
+            ++done;
+
             const auto modified = f.getLastModificationTime();
             const auto bytes = f.getSize();
             const bool linked = ! f.isAChildOf (dir);
@@ -206,7 +221,14 @@ void SampleLibrary::rescan()
             list.push_back (std::move (s));
         }
     }
+    if (progress != nullptr)
+        progress (total, total);
+
+    lists = std::move (fresh);
+    missing = stillThere;
+    return true;
 }
+
 int SampleLibrary::saveOriginals (const juce::String& beatName, const juce::AudioBuffer<float>& audio, double sampleRate,
                                   const std::vector<Cut>& cuts)
 {

@@ -12,6 +12,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <atomic>
 #include <map>
 
 #include <optional>
@@ -194,7 +195,12 @@ public:
     // --- Rebuilding the beat with other sounds (stage 3) ---
 
     drb::SampleLibrary& getLibrary() { return library; }
+    // Reads the library again on a background thread (a big one, with
+    // thousands of linked sounds, takes a while: the window must not wait);
+    // a change message when it is done. A new call restarts it.
     void rescanLibrary();
+    bool isLibraryLoading() const { return libraryJob != nullptr; }
+    std::pair<int, int> getLibraryProgress() const;   // sounds read, of how many
     void moveSample (int folder, int from, int to);   // the user's order in the library
     juce::String getBeatName() const;   // the recording's file name, for its originals
     // Cuts every hit of this beat between its IN and OUT into the
@@ -283,6 +289,13 @@ private:
     std::array<bool, drb::numInstruments> solo {};
 
     drb::SampleLibrary library { drb::SampleLibrary::defaultRoot() };
+    struct LibraryJob
+    {
+        std::atomic<bool> stop { false };
+        std::atomic<int> done { 0 }, total { 0 };
+    };
+    std::shared_ptr<LibraryJob> libraryJob;
+    int libraryGeneration = 0;
     std::array<drb::PickMode, drb::numInstruments> pickModes {};
     std::array<double, drb::numInstruments> soundLengths {}, soundIns {};
     drb::MasterSettings master;

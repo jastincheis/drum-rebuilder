@@ -7,10 +7,14 @@
 DrumRebuilderProcessor::DrumRebuilderProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
-    library.rescan();
+    rescanLibrary();
 }
 
-DrumRebuilderProcessor::~DrumRebuilderProcessor() = default;
+DrumRebuilderProcessor::~DrumRebuilderProcessor()
+{
+    if (libraryJob != nullptr)
+        libraryJob->stop = true;
+}
 
 void DrumRebuilderProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
@@ -1359,10 +1363,46 @@ void DrumRebuilderProcessor::pauseSolo()
 
 void DrumRebuilderProcessor::rescanLibrary()
 {
-    library.rescan();
-    chooseDefaultSounds();
-    requestRender();
+    if (libraryJob != nullptr)
+        libraryJob->stop = true;
+    auto job = std::make_shared<LibraryJob>();
+    libraryJob = job;
+    const int generation = ++libraryGeneration;
+    // A copy: the sounds already read stay shared, only new ones load.
+    auto copy = std::make_shared<drb::SampleLibrary> (library);
+    juce::WeakReference<DrumRebuilderProcessor> self (this);
+
+    juce::Thread::launch ([self, job, generation, copy]
+    {
+        const bool complete = copy->rescan ([job] (int done, int total)
+        {
+            job->done = done;
+            job->total = total;
+            return ! job->stop.load();
+        });
+        if (! complete)
+            return;
+
+        juce::MessageManager::callAsync ([self, generation, copy]
+        {
+            auto* p = self.get();
+            if (p == nullptr || generation != p->libraryGeneration)
+                return;
+            p->library = std::move (*copy);
+            p->libraryJob.reset();
+            p->chooseDefaultSounds();
+            p->requestRender();
+            p->sendChangeMessage();
+        });
+    });
     sendChangeMessage();
+}
+
+std::pair<int, int> DrumRebuilderProcessor::getLibraryProgress() const
+{
+    if (libraryJob == nullptr)
+        return { 0, 0 };
+    return { libraryJob->done.load(), libraryJob->total.load() };
 }
 
 void DrumRebuilderProcessor::moveSample (int folder, int from, int to)
@@ -1379,7 +1419,7 @@ juce::String DrumRebuilderProcessor::getBeatName() const
 
 int DrumRebuilderProcessor::saveOriginals()
 {
-    if (loaded == nullptr)
+    if (loaded == nullptr || isLibraryLoading())
         return 0;
     std::vector<drb::Cut> cuts;
     for (size_t i = 0; i < analysis.hits.size(); ++i)
@@ -1781,7 +1821,13 @@ void DrumRebuilderProcessor::renderRebuilt (std::function<void (bool, juce::Audi
         auto beat = std::make_shared<juce::AudioBuffer<float>> (
             drb::renderRebuild (job->input, job->settings, job->rate, 2.0 + job->master.tailSeconds (job->bpm)));
         drb::applyMaster (*beat, job->rate, job->bpm, job->master);
-        juce::MessageManager::callAsync ([job, beat] { job->done (beat->getNumSamples() > 0, std::move (*beat), job->rate); });
+        juce::MessageManager::callAsync ([job, beat]
+        {
+            // Asked first: MSVC builds the moved-from argument before the
+            // others (right to left), which left the check an empty buffer.
+            const bool ok = beat->getNumSamples() > 0;
+            job->done (ok, std::move (*beat), job->rate);
+        });
     });
 }
 

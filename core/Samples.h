@@ -58,14 +58,16 @@ public:
     static juce::File defaultRoot();   // ~/Music/Drum Rebuilder/Samples
 
     juce::File getRoot() const { return root; }
-    void setRoot (const juce::File&);
+    void setRoot (const juce::File&);   // empties the lists: rescan() after
     juce::File folderFor (Instrument i) const { return folderAt ((int) i); }
     juce::File folderAt (int folder) const;
 
     // Reads every folder again (loads the sounds into memory; the Loops
     // only by their length, they play from the file). Sounds that didn't
-    // change are kept from the last time.
-    void rescan();
+    // change are kept from the last time. Only reads the disk, so it can run
+    // on a copy on a background thread; `progress` (done, total) returns
+    // false to stop, and then nothing changes and it returns false.
+    bool rescan (const std::function<bool (int, int)>& progress = nullptr);
     const std::vector<SamplePtr>& samples (Instrument i) const { return lists[(size_t) i]; }
     const std::vector<SamplePtr>& inFolder (int folder) const { return lists[(size_t) folder]; }
     int missingLinks() const { return missing; }   // linked files not found at the last rescan

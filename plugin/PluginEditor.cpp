@@ -1073,14 +1073,29 @@ public:
         rootLabel.setText ("Library: " + processor.getLibrary().getRoot().getFullPathName()
                                + (missing > 0 ? "   (" + juce::String (missing) + " linked sounds not found: moved or deleted?)" : juce::String()),
                            juce::dontSendNotification);
-        saveButton.setEnabled (processor.getLoaded() != nullptr && ! processor.getAnalysis().hits.empty());
+        // While the library loads, nothing that changes it.
+        const bool loading = processor.isLibraryLoading();
+        saveButton.setEnabled (! loading && processor.getLoaded() != nullptr && ! processor.getAnalysis().hits.empty());
+        for (auto* b : { &importButton, &addButton, &changeFolderButton })
+            b->setEnabled (! loading || (b == &importButton && job != nullptr));
+        if (loading)
+        {
+            if (! wasLoading)
+                beforeLoading = result.getText();   // e.g. what an import did: back when it is loaded
+            showLoading();
+            if (! isTimerRunning())
+                startTimer (200);
+        }
+        else if (wasLoading)
+            result.setText (beforeLoading, juce::dontSendNotification);
+        wasLoading = loading;
         instruments.updateContent();
         sounds.updateContent();
         instruments.repaint();
         sounds.repaint();
         const auto selected = selectedSample();
         useButton.setEnabled (selected != nullptr && isInstrumentFolder());
-        trashButton.setEnabled (selected != nullptr);
+        trashButton.setEnabled (! loading && selected != nullptr);
         trashButton.setButtonText (selected != nullptr && selected->linked ? "Remove" : "Move to trash");
         trashButton.setTooltip (selected != nullptr && selected->linked ? "Takes it out of the library; your file stays where it is" : "");
     }
@@ -1111,6 +1126,11 @@ public:
     {
         const int row = dropInstrumentAt ({ x, y });
         fileTarget = -1;
+        if (processor.isLibraryLoading())
+        {
+            repaint();
+            return;
+        }
         juce::Array<juce::File> list;
         for (const auto& f : files)
             list.add (juce::File (f));
@@ -1287,6 +1307,8 @@ private:
 
     void moveSound (int from, int to)
     {
+        if (processor.isLibraryLoading())
+            return;
         processor.moveSample (folder(), from, to);
         sounds.selectRow (juce::jlimit (0, getNumRows() - 1, to));
         update();
@@ -1296,7 +1318,7 @@ private:
     void moveToFolder (int row, int target)
     {
         const auto& list = shown();
-        if (! juce::isPositiveAndBelow (row, (int) list.size()) || target == folder())
+        if (processor.isLibraryLoading() || ! juce::isPositiveAndBelow (row, (int) list.size()) || target == folder())
             return;
         const auto s = list[(size_t) row];
         if (processor.getLibrary().moveToFolder (folder(), s, target))
@@ -1311,6 +1333,7 @@ private:
 
     struct ImportJob : public juce::Thread
     {
+        // A copy of the library: it may be read again while this runs.
         ImportJob (const drb::SampleLibrary& l, const juce::File& d) : juce::Thread ("Import sounds"), library (l), dir (d) {}
         void run() override
         {
@@ -1322,7 +1345,7 @@ private:
             });
             finished = true;
         }
-        const drb::SampleLibrary& library;
+        const drb::SampleLibrary library;
         const juce::File dir;
         drb::SampleLibrary::ImportSummary summary;
         std::atomic<int> done { 0 }, total { 0 };
@@ -1362,11 +1385,25 @@ private:
             job->signalThreadShouldExit();
     }
 
+    bool wasLoading = false;
+    juce::String beforeLoading;
+
+    void showLoading()
+    {
+        const auto [done, total] = processor.getLibraryProgress();
+        result.setText (total > 0 ? "Loading the library: " + juce::String (done) + " of " + juce::String (total) + " sounds..."
+                                  : juce::String ("Looking for the library's sounds..."),
+                        juce::dontSendNotification);
+    }
+
     void timerCallback() override
     {
         if (job == nullptr)
         {
-            stopTimer();
+            if (processor.isLibraryLoading())
+                showLoading();
+            else
+                stopTimer();
             return;
         }
         if (! job->finished)
@@ -1546,7 +1583,7 @@ private:
                                   | juce::FileBrowserComponent::canSelectMultipleItems,
                               [self, inst] (const juce::FileChooser& fc)
                               {
-                                  if (self == nullptr || fc.getResults().isEmpty())
+                                  if (self == nullptr || fc.getResults().isEmpty() || self->processor.isLibraryLoading())
                                       return;
                                   const int n = self->processor.getLibrary().addFiles (inst, fc.getResults());
                                   self->processor.rescanLibrary();
