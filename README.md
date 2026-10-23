@@ -8,20 +8,47 @@ hi-hats, clap, rimshot, toms, crash, ride) with velocity, swing and
 microtiming, turns them into editable MIDI, and rebuilds the beat with your own
 samples while keeping the groove.
 
-**Status: stage 3 (in progress)** — browse and preview files, open a recording,
-see its waveform with the bar and beat grid and every hit named (kick, snare,
-hi-hat closed / open), fix tempo, bar 1, hits, instruments and each hit's IN /
-OUT by hand, solo instruments, MIDI Editor with quantize and undo, MIDI
-export. Each beat remembers its fixes. Sample library with one folder per
-instrument (the beat's original hits are saved into it), and the beat rebuilt
-from it: per instrument Original / Fixed / Random / Round robin / By velocity,
-Next sounds, keep the original pitch, another tempo, A/B, WAV export.
+**Status: preview (0.3.0), stage 3 done, stage 5 started.** It works and is
+used, but things still change between versions.
+[Download the latest release](https://github.com/jastincheis/drum-rebuilder/releases).
+It is also built into [Adormis Audio](https://github.com/jastincheis/adormis-audio)
+(Tools > Drum Rebuilder).
 
-Keys: Space play / pause, W / E start / end, Left / Right previous / next hit,
+## What it does, tab by tab
+
+- **Import**: open a drums-only recording. A file browser inside the window
+  plays each file when you click it, with its waveform. Inside Adormis Audio
+  the list also shows every file open there (stem tabs too).
+- **Analysis**: tempo, bar 1 and the bar / beat grid, found by itself and
+  fixable by hand.
+- **Instruments**: the waveform with every hit named. Kick, snare and hi-hat
+  (closed / open) are found by themselves; clap, rimshot, toms, crash and ride
+  you name by hand. Click a name to change it, double-click to add or delete a
+  marker, drag each hit's IN / OUT. Solo one or more instruments to hear only
+  them; while they are on solo only their markers can be changed.
+- **MIDI Editor**: every hit as a bar with its real level in dB. Change
+  levels (up to +12 dB), quantize, select many at once, undo, and save MIDI.
+- **Sample Browser**: your sound library, one folder per instrument, plus
+  **Unsorted** and **Loops**. **Import a folder...** sorts a whole folder of
+  sounds by name, or by how they sound when the name says nothing, and
+  **links** them: your files stay where they are. Drag a sound onto another
+  folder to move it, **Remove** to take it out. The beat's own hits are saved
+  here too.
+- **Drum Rack**: the beat rebuilt with your sounds, per instrument Original /
+  Fixed / Random / Round robin / By velocity, Next sounds, keep the original
+  pitch, another tempo, IN / OUT of each sound, and A/B against the original.
+- **Master**: volume, Reverb and Delay (in time with the beat) for the
+  rebuilt beat.
+- **Export**: WAV of the rebuilt beat and MIDI of the hits (inside Adormis
+  Audio, the rebuilt beat can go straight back into it).
+
+Each beat remembers its fixes.
+
+## Keys
+
+Space play / pause, W / E start / end, Left / Right previous / next hit,
 Up / Down zoom, Ctrl+Z / Ctrl+Shift+Z undo / redo, Delete removes the selected
 hit in the MIDI Editor.
-
-`drb_tests --analyse <file>` prints what the analysis finds in any recording.
 
 ## Plan
 
@@ -52,6 +79,9 @@ cmake --build build -j8
 ```
 
 AU builds only on macOS.
+
+`drb_tests --analyse <file>` prints what the analysis finds in any recording,
+`drb_tests --sort <folder>` how a folder of sounds would be sorted.
 
 ## Licence
 
