@@ -44,6 +44,7 @@ target_sources(drb_core INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Classify.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Midi.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Samples.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/core/SampleSort.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Rebuild.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/HitGains.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/core/Effects.cpp)

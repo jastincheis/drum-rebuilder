@@ -1,10 +1,12 @@
 #include "Samples.h"
 #include "AudioFile.h"
+#include "SampleSort.h"
 
 #include <juce_dsp/juce_dsp.h>
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 
 namespace drb
 {
@@ -61,6 +63,26 @@ float estimatePitch (const juce::AudioBuffer<float>& audio, double sampleRate, I
     return (float) ((best + std::clamp (offset, -0.5, 0.5)) * binHz);
 }
 
+juce::String folderName (int folder)
+{
+    if (folder == unsortedFolder)
+        return "Unsorted";
+    if (folder == loopsFolder)
+        return "Loops";
+    return instrumentName (allInstruments[(size_t) juce::jlimit (0, numInstruments - 1, folder)]);
+}
+
+namespace
+{
+double fileSeconds (const juce::File& f)
+{
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (f));
+    return reader != nullptr && reader->sampleRate > 0.0 ? (double) reader->lengthInSamples / reader->sampleRate : -1.0;
+}
+} // namespace
+
 SampleLibrary::SampleLibrary (const juce::File& r) : root (r) {}
 
 juce::File SampleLibrary::defaultRoot()
@@ -74,26 +96,61 @@ void SampleLibrary::setRoot (const juce::File& r)
     rescan();
 }
 
-juce::File SampleLibrary::folderFor (Instrument i) const
+juce::File SampleLibrary::folderAt (int folder) const
 {
-    return root.getChildFile (instrumentName (i));
+    return root.getChildFile (folderName (folder));
+}
+
+juce::StringArray SampleLibrary::readLinks (int folder) const
+{
+    auto lines = juce::StringArray::fromLines (folderAt (folder).getChildFile (linksFileName()).loadFileAsString());
+    lines.trim();
+    lines.removeEmptyStrings();
+    return lines;
+}
+
+bool SampleLibrary::writeLinks (int folder, const juce::StringArray& links) const
+{
+    const auto dir = folderAt (folder);
+    if (! dir.createDirectory())
+        return false;
+    const auto file = dir.getChildFile (linksFileName());
+    if (links.isEmpty())
+        return file.deleteFile();
+    return file.replaceWithText (links.joinIntoString ("\n") + "\n");
 }
 
 void SampleLibrary::rescan()
 {
-    for (auto inst : allInstruments)
+    // What we have now, to keep the sounds that didn't change.
+    std::map<juce::String, SamplePtr> before;
+    for (const auto& list : lists)
+        for (const auto& s : list)
+            before[s->file.getFullPathName()] = s;
+
+    missing = 0;
+    for (int folder = 0; folder < numFolders; ++folder)
     {
-        auto& list = lists[(size_t) inst];
+        auto& list = lists[(size_t) folder];
         list.clear();
-        const auto folder = folderFor (inst);
-        if (! folder.isDirectory())
+        const auto dir = folderAt (folder);
+        if (! dir.isDirectory())
             continue;
 
-        auto files = folder.findChildFiles (juce::File::findFiles, false, supportedWildcard());
-        files.sort();
+        auto files = dir.findChildFiles (juce::File::findFiles, false, supportedWildcard());
+        for (const auto& path : readLinks (folder))
+        {
+            const juce::File f (path);
+            if (f.existsAsFile())
+                files.add (f);
+            else
+                ++missing;   // kept in links.txt: it may come back (a disk plugged in again)
+        }
 
         // The user's order first, then the rest by name.
-        const auto order = juce::StringArray::fromLines (folder.getChildFile (orderFileName()).loadFileAsString());
+        auto byName = [] (const juce::File& a, const juce::File& b) { return a.getFileName().compareNatural (b.getFileName()) < 0; };
+        std::sort (files.begin(), files.end(), byName);
+        const auto order = juce::StringArray::fromLines (dir.getChildFile (orderFileName()).loadFileAsString());
         std::stable_sort (files.begin(), files.end(), [&] (const juce::File& a, const juce::File& b)
         {
             auto rank = [&] (const juce::File& f)
@@ -103,28 +160,53 @@ void SampleLibrary::rescan()
             };
             return rank (a) < rank (b);
         });
+
         for (const auto& f : files)
         {
-            juce::String error;
-            auto loaded = loadAudioFile (f, error, 10.0);   // drum hits: 10 s is plenty
-            if (! loaded)
+            const auto modified = f.getLastModificationTime();
+            const auto bytes = f.getSize();
+            const bool linked = ! f.isAChildOf (dir);
+            if (const auto it = before.find (f.getFullPathName()); it != before.end() && it->second->modified == modified
+                                                                   && it->second->bytes == bytes && it->second->linked == linked
+                                                                   && (folder == loopsFolder) == (it->second->audio.getNumSamples() == 0))
+            {
+                list.push_back (it->second);
                 continue;
+            }
 
             auto s = std::make_shared<Sample>();
             s->file = f;
-            s->audio = std::move (loaded->audio);
-            s->sampleRate = loaded->sampleRate;
+            s->linked = linked;
+            s->modified = modified;
+            s->bytes = bytes;
+            if (folder == loopsFolder)
+            {
+                // Loops play straight from the file; only how long they are.
+                s->seconds = fileSeconds (f);
+                if (s->seconds < 0.0)
+                    continue;
+            }
+            else
+            {
+                juce::String error;
+                auto loaded = loadAudioFile (f, error, 10.0);   // drum hits: 10 s is plenty
+                if (! loaded)
+                    continue;
+                s->audio = std::move (loaded->audio);
+                s->sampleRate = loaded->sampleRate;
+                s->seconds = s->audio.getNumSamples() / s->sampleRate;
+                s->peak = s->audio.getMagnitude (0, s->audio.getNumSamples());
+                if (folder < numInstruments)
+                    s->pitch = estimatePitch (s->audio, s->sampleRate, allInstruments[(size_t) folder]);
+            }
             const auto name = f.getFileNameWithoutExtension();
-            s->original = name.contains (originalsTag());
+            s->original = ! linked && name.contains (originalsTag());
             if (s->original)
                 s->fromBeat = name.upToFirstOccurrenceOf (originalsTag(), false, false);
-            s->peak = s->audio.getMagnitude (0, s->audio.getNumSamples());
-            s->pitch = estimatePitch (s->audio, s->sampleRate, inst);
             list.push_back (std::move (s));
         }
     }
 }
-
 int SampleLibrary::saveOriginals (const juce::String& beatName, const juce::AudioBuffer<float>& audio, double sampleRate,
                                   const std::vector<Cut>& cuts)
 {
@@ -162,9 +244,9 @@ int SampleLibrary::saveOriginals (const juce::String& beatName, const juce::Audi
     return written;
 }
 
-void SampleLibrary::moveSample (Instrument inst, int from, int to)
+void SampleLibrary::moveSample (int folder, int from, int to)
 {
-    auto& list = lists[(size_t) inst];
+    auto& list = lists[(size_t) folder];
     if (! juce::isPositiveAndBelow (from, (int) list.size()))
         return;
     to = juce::jlimit (0, (int) list.size() - 1, to);
@@ -173,30 +255,129 @@ void SampleLibrary::moveSample (Instrument inst, int from, int to)
     auto s = list[(size_t) from];
     list.erase (list.begin() + from);
     list.insert (list.begin() + to, std::move (s));
-    saveOrder (inst);
+    saveOrder (folder);
 }
 
-void SampleLibrary::saveOrder (Instrument inst) const
+void SampleLibrary::saveOrder (int folder) const
 {
     juce::StringArray names;
-    for (const auto& s : lists[(size_t) inst])
+    for (const auto& s : lists[(size_t) folder])
         names.add (s->file.getFileName());
-    folderFor (inst).getChildFile (orderFileName()).replaceWithText (names.joinIntoString ("\n") + "\n");
+    folderAt (folder).getChildFile (orderFileName()).replaceWithText (names.joinIntoString ("\n") + "\n");
 }
 
-int SampleLibrary::addFiles (Instrument instrument, const juce::Array<juce::File>& files)
+int SampleLibrary::addFiles (int folder, const juce::Array<juce::File>& files)
 {
-    const auto folder = folderFor (instrument);
-    if (! folder.createDirectory())
+    const auto dir = folderAt (folder);
+    if (! dir.createDirectory())
         return 0;
 
     int copied = 0;
     for (const auto& f : files)
-        if (f.existsAsFile() && isSupported (f) && f.copyFileTo (folder.getNonexistentChildFile (f.getFileNameWithoutExtension(),
-                                                                                                f.getFileExtension(), false)))
+        if (f.existsAsFile() && isSupported (f) && f.copyFileTo (dir.getNonexistentChildFile (f.getFileNameWithoutExtension(),
+                                                                                             f.getFileExtension(), false)))
             ++copied;
     rescan();
     return copied;
+}
+
+bool SampleLibrary::remove (int folder, const SamplePtr& s)
+{
+    if (s == nullptr || ! juce::isPositiveAndBelow (folder, numFolders))
+        return false;
+    bool done = false;
+    if (s->linked)
+    {
+        auto links = readLinks (folder);
+        const int before = links.size();
+        links.removeString (s->file.getFullPathName());
+        done = links.size() < before && writeLinks (folder, links);
+    }
+    else
+        done = s->file.isAChildOf (folderAt (folder)) && s->file.moveToTrash();
+    rescan();
+    return done;
+}
+
+bool SampleLibrary::moveToFolder (int from, const SamplePtr& s, int to)
+{
+    if (s == nullptr || from == to || ! juce::isPositiveAndBelow (from, numFolders) || ! juce::isPositiveAndBelow (to, numFolders))
+        return false;
+    bool done = false;
+    if (s->linked)
+    {
+        auto links = readLinks (from);
+        links.removeString (s->file.getFullPathName());
+        auto there = readLinks (to);
+        there.addIfNotAlreadyThere (s->file.getFullPathName());
+        done = writeLinks (to, there) && writeLinks (from, links);
+    }
+    else
+    {
+        const auto dir = folderAt (to);
+        done = dir.createDirectory()
+            && s->file.moveFileTo (dir.getNonexistentChildFile (s->file.getFileNameWithoutExtension(), s->file.getFileExtension(), false));
+    }
+    rescan();
+    return done;
+}
+
+int SampleLibrary::ImportSummary::total() const
+{
+    int n = 0;
+    for (auto a : added)
+        n += a;
+    return n;
+}
+
+SampleLibrary::ImportSummary SampleLibrary::importFolder (const juce::File& dir, const std::function<bool (int, int)>& progress) const
+{
+    ImportSummary summary;
+    const auto files = dir.findChildFiles (juce::File::findFiles, true, supportedWildcard());
+    summary.found = files.size();
+
+    // What the library has already: its own files and every link.
+    std::array<juce::StringArray, numFolders> links;
+    juce::StringArray known;
+    for (int folder = 0; folder < numFolders; ++folder)
+    {
+        links[(size_t) folder] = readLinks (folder);
+        known.addArray (links[(size_t) folder]);
+    }
+
+    for (int i = 0; i < files.size(); ++i)
+    {
+        if (progress != nullptr && ! progress (i, files.size()))
+        {
+            summary.stopped = true;
+            break;
+        }
+        const auto& f = files.getReference (i);
+        if (f.isAChildOf (root) || known.contains (f.getFullPathName()))
+        {
+            ++summary.skipped;
+            continue;
+        }
+        juce::String error;
+        auto loaded = loadAudioFile (f, error, 12.0);
+        if (! loaded)
+        {
+            ++summary.skipped;
+            continue;
+        }
+        const auto r = sortSound (f, dir, loaded->audio, loaded->sampleRate);
+        const int folder = r.as == SortedAs::Loop ? loopsFolder : r.as == SortedAs::Unsorted ? unsortedFolder : (int) r.instrument;
+        links[(size_t) folder].add (f.getFullPathName());
+        known.add (f.getFullPathName());
+        ++summary.added[(size_t) folder];
+    }
+
+    for (int folder = 0; folder < numFolders; ++folder)
+        if (summary.added[(size_t) folder] > 0)
+            writeLinks (folder, links[(size_t) folder]);
+    if (progress != nullptr && ! summary.stopped)
+        progress (files.size(), files.size());
+    return summary;
 }
 
 } // namespace drb

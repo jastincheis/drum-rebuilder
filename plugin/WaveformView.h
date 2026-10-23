@@ -85,6 +85,11 @@ private:
     bool focused (drb::Instrument i) const { return std::find (focus.begin(), focus.end(), i) != focus.end(); }
     bool instrumentMode = false;
 
+    // Instruments tab with instruments on solo: only theirs can be changed
+    // (names, IN / OUT, markers); the others are shown but locked.
+    bool editable (drb::Instrument i) const { return ! instrumentMode || focus.empty() || focused (i); }
+    bool editableOnset (int onset) const;   // has at least one editable instrument
+
     // The instrument bars drawn on the waveform (name + IN..OUT), for clicks.
     struct Pill { juce::Rectangle<int> label, bar; int onset, hit; drb::Instrument instrument; };
     std::vector<Pill> pills;

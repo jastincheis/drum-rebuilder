@@ -360,6 +360,11 @@ void DrumRebuilderProcessor::endHitPreview()
 
 void DrumRebuilderProcessor::previewSample (const drb::Sample& sample)
 {
+    if (sample.audio.getNumSamples() == 0)   // a loop: it plays from its file
+    {
+        previewFile (sample.file);
+        return;
+    }
     const double rate = preparedRate > 0.0 ? preparedRate : 44100.0;
     player.pause();
     auditionPlayer.pause();
@@ -1360,9 +1365,9 @@ void DrumRebuilderProcessor::rescanLibrary()
     sendChangeMessage();
 }
 
-void DrumRebuilderProcessor::moveSample (drb::Instrument i, int from, int to)
+void DrumRebuilderProcessor::moveSample (int folder, int from, int to)
 {
-    library.moveSample (i, from, to);
+    library.moveSample (folder, from, to);
     requestRender();   // round robin plays them in this order
     sendChangeMessage();
 }

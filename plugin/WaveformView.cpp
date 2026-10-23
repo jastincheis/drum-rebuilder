@@ -527,8 +527,9 @@ void BeatWaveformView::paint (juce::Graphics& g)
 // top) win otherwise.
 BeatWaveformView::PillPart BeatWaveformView::findPill (juce::Point<int> p, const Pill*& found) const
 {
-    // Bottom: the IN..OUT bars, by their ends. Top: the names.
-    const auto onRow = [p] (const Pill& pill) { return p.y >= pill.bar.getY() && p.y < pill.bar.getBottom(); };
+    // Bottom: the IN..OUT bars, by their ends. Top: the names. Locked ones
+    // (not on solo) are not there for the mouse.
+    const auto onRow = [this, p] (const Pill& pill) { return editable (pill.instrument) && p.y >= pill.bar.getY() && p.y < pill.bar.getBottom(); };
 
     for (auto it = pills.rbegin(); it != pills.rend(); ++it)
         if (onRow (*it) && std::abs (p.x - it->bar.getRight()) <= 5)
@@ -543,7 +544,7 @@ BeatWaveformView::PillPart BeatWaveformView::findPill (juce::Point<int> p, const
             return PillPart::in;
         }
     for (auto it = pills.rbegin(); it != pills.rend(); ++it)
-        if (it->label.contains (p))
+        if (editable (it->instrument) && it->label.contains (p))
         {
             found = &*it;
             return PillPart::label;
@@ -615,6 +616,14 @@ void BeatWaveformView::mouseDown (const juce::MouseEvent& e)
         markerGrabOffset = processor.getAnalysis().onsets[(size_t) grabbedHit].time - dragAnchor;
 }
 
+bool BeatWaveformView::editableOnset (int onset) const
+{
+    if (! instrumentMode || focus.empty())
+        return true;
+    const auto present = processor.getInstrumentsAt (onset);
+    return std::any_of (present.begin(), present.end(), [this] (drb::Instrument inst) { return focused (inst); });
+}
+
 double BeatWaveformView::markerSeconds (int onset) const
 {
     const auto& onsets = processor.getAnalysis().onsets;
@@ -647,6 +656,8 @@ BeatWaveformView::Grab BeatWaveformView::findGrab (juce::Point<int> p, int& hitI
         hitIndex = -1;
         for (size_t i = 0; i < analysis.onsets.size(); ++i)
         {
+            if (! editableOnset ((int) i))
+                continue;   // only the solo instruments' markers move
             // Instruments tab: the handle runs from the marker's line to the right.
             const float d = instrumentMode ? std::abs (secondsToX (markerSeconds ((int) i)) + handleWidth * 0.5f - (float) p.x)
                                            : std::abs (secondsToX (analysis.onsets[i].time) - (float) p.x);
@@ -789,7 +800,8 @@ void BeatWaveformView::mouseUp (const juce::MouseEvent& e)
         lassoing = false;
         const auto& onsets = processor.getAnalysis().onsets;
         for (const auto& pill : pills)
-            if ((lasso.intersects (pill.label) || lasso.intersects (pill.bar)) && juce::isPositiveAndBelow (pill.onset, (int) onsets.size())
+            if ((lasso.intersects (pill.label) || lasso.intersects (pill.bar)) && editable (pill.instrument)
+                && juce::isPositiveAndBelow (pill.onset, (int) onsets.size())
                 && ! isSelected (onsets[(size_t) pill.onset].time, pill.instrument))
                 selection.push_back ({ onsets[(size_t) pill.onset].time, pill.instrument });
         lasso = {};
@@ -858,7 +870,7 @@ void BeatWaveformView::showMenu (const juce::MouseEvent& e)
     int index = -1;
     float best = 7.0f;
     for (size_t i = 0; i < onsets.size(); ++i)
-        if (const float d = std::abs (secondsToX (onsets[i].time) - (float) e.x); d < best)
+        if (const float d = std::abs (secondsToX (onsets[i].time) - (float) e.x); d < best && editableOnset ((int) i))
         {
             best = d;
             index = (int) i;
@@ -1124,28 +1136,23 @@ void BeatWaveformView::mouseDoubleClick (const juce::MouseEvent& e)
     // instruments' are not touched), and what is added is one of them.
     if (instrumentMode)
     {
-        const auto ownMarker = [this] (int i)
-        {
-            if (focus.empty())
-                return true;
-            const auto present = processor.getInstrumentsAt (i);
-            return std::any_of (present.begin(), present.end(), [this] (drb::Instrument inst) { return focused (inst); });
-        };
+        const auto ownMarker = [this] (int i) { return editableOnset (i); };
         int index = -1;
         if (findGrab (e.getPosition(), index) != Grab::hit && waveArea().contains (e.getPosition()))
         {
             float best = 6.0f;
             const auto& onsets = processor.getAnalysis().onsets;
             for (size_t i = 0; i < onsets.size(); ++i)
-                if (const float d = std::abs (secondsToX (markerSeconds ((int) i)) - (float) e.x); d < best)
+                if (const float d = std::abs (secondsToX (markerSeconds ((int) i)) - (float) e.x); d < best && ownMarker ((int) i))
                 {
                     best = d;
                     index = (int) i;
                 }
         }
         grab = Grab::none;
-        // Another instrument's marker (not on solo) is left alone.
-        if (index >= 0 && ownMarker (index))
+        // Another instrument's marker (not on solo) is left alone: the
+        // double-click adds a solo one there.
+        if (index >= 0)
         {
             clearSelection();
             if (focus.empty())

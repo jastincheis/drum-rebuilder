@@ -195,7 +195,7 @@ public:
 
     drb::SampleLibrary& getLibrary() { return library; }
     void rescanLibrary();
-    void moveSample (drb::Instrument, int from, int to);   // the user's order in the library
+    void moveSample (int folder, int from, int to);   // the user's order in the library
     juce::String getBeatName() const;   // the recording's file name, for its originals
     // Cuts every hit of this beat between its IN and OUT into the
     // instrument folders. Returns how many sounds were written.
@@ -259,6 +259,16 @@ public:
     // tab then offers to open the rebuilt beat there.
     std::function<void (juce::AudioBuffer<float>, double sampleRate)> sendToHost;
     juce::String hostName;
+
+    // The beats open in the host (each file, each stem tab), to open one
+    // from the Import page / Open panel. `file` hands it over (written to a
+    // file when needed); an empty file = gone in the meantime.
+    struct HostBeat
+    {
+        juce::String name;
+        std::function<juce::File()> file;
+    };
+    std::function<std::vector<HostBeat>()> hostBeats;
 
     // Instrument checks (0 = not yet, 1 = OK, 2 = wrong), kept with the state.
     int getCheck (drb::Instrument i) const { return checks[(size_t) i]; }

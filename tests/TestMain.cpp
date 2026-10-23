@@ -13,6 +13,7 @@
 #include "Onsets.h"
 #include "Rebuild.h"
 #include "Samples.h"
+#include "SampleSort.h"
 #include "Player.h"
 #include "Evaluation.h"
 #include "SyntheticDrums.h"
@@ -764,8 +765,124 @@ void checkFindAttack()
     check (findAttack (audio, sr, 0.3, 0.04) < 0.0, "no sound there = nothing found");
 }
 
+// "Import a folder": names, sounds, loops; links that leave the user's
+// files alone when removed or moved.
+void checkImport()
+{
+    const juce::File top ("/x/Packs/Drums");
+    auto name = [&] (const char* path) { return instrumentFromName (top.getChildFile (path), top); };
+    check (name ("FL_TR_Kit03_KickOneShot.wav") == Instrument::Kick && name ("BT_OH1.wav") == Instrument::HiHatOpen
+               && name ("hihat_closed_02.wav") == Instrument::HiHatClosed && name ("Snares/tight 3.wav") == Instrument::Snare
+               && name ("SS_MA_perc_tom.wav") == Instrument::TomMid && name ("floor tom.wav") == Instrument::TomLow
+               && ! name ("CLF_85_Kick_Clap_Golden.wav") && ! name ("CPA_bumper.wav"),
+           "instruments told by the file and folder names (two drums in a name = not by name)");
+    check (nameSaysLoop (top.getChildFile ("Loops/funk 95.wav"), top) && ! nameSaysLoop (top.getChildFile ("kick 95.wav"), top),
+           "loops told by name");
+
+    const double sr = 44100.0;
+    juce::Random random (7);
+    auto kick = [&] (juce::AudioBuffer<float>& b, int at)
+    {
+        for (int i = 0; i < (int) (0.4 * sr) && at + i < b.getNumSamples(); ++i)
+            b.addSample (0, at + i, 0.9f * (float) std::exp (-i / sr * 12.0) * (float) std::sin (juce::MathConstants<double>::twoPi * 55.0 * i / sr));
+    };
+    auto hat = [&] (juce::AudioBuffer<float>& b, int at, double decay)
+    {
+        float last = 0.0f;
+        for (int i = 0; i < (int) (decay * 6.0 * sr) && at + i < b.getNumSamples(); ++i)
+        {
+            const float n = random.nextFloat() * 2.0f - 1.0f;
+            b.addSample (0, at + i, 0.6f * (float) std::exp (-i / sr / decay) * (n - last));   // high-passed noise
+            last = n;
+        }
+    };
+
+    juce::TemporaryFile packTemp, libTemp;
+    const auto pack = packTemp.getFile(), root = libTemp.getFile();
+    pack.createDirectory();
+    juce::AudioBuffer<float> one (1, (int) (0.5 * sr));
+    one.clear();
+    kick (one, 0);
+    writeWav (pack.getChildFile ("Big Kick.wav"), one, sr);
+    writeWav (pack.getChildFile ("Sounds/sound 7.wav"), one, sr);            // a kick by its sound
+    one.clear();
+    hat (one, 0, 0.02);
+    writeWav (pack.getChildFile ("thing 2.wav"), one, sr);                   // a closed hat by its sound
+    juce::AudioBuffer<float> loop (1, (int) (2.0 * sr));
+    loop.clear();
+    for (int k = 0; k < 4; ++k)
+        kick (loop, (int) (k * 0.5 * sr));
+    writeWav (pack.getChildFile ("kick pattern.wav"), loop, sr);             // a loop, though it says "kick"
+    juce::AudioBuffer<float> hum (1, (int) (0.5 * sr));
+    for (int i = 0; i < hum.getNumSamples(); ++i)
+        hum.setSample (0, i, 0.5f * (float) std::sin (juce::MathConstants<double>::twoPi * 700.0 * i / sr));
+    writeWav (pack.getChildFile ("pad.wav"), hum, sr);                       // not a drum
+
+    SampleLibrary library (root);
+    int calls = 0;
+    const auto first = library.importFolder (pack, [&] (int, int) { ++calls; return true; });
+    library.rescan();
+    const auto& kicks = library.samples (Instrument::Kick);
+    check (first.total() == 5 && first.added[(size_t) Instrument::Kick] == 2 && first.added[(size_t) Instrument::HiHatClosed] == 1
+               && first.added[(size_t) loopsFolder] == 1 && first.added[(size_t) unsortedFolder] == 1 && calls >= 5,
+           "a folder imported: 2 kicks (name + sound), a hat by sound, the loop, the pad in Unsorted");
+    check (kicks.size() == 2 && kicks[0]->linked && kicks[0]->file.isAChildOf (pack)
+               && library.inFolder (loopsFolder).size() == 1 && library.inFolder (loopsFolder)[0]->audio.getNumSamples() == 0
+               && std::abs (library.inFolder (loopsFolder)[0]->seconds - 2.0) < 0.01,
+           "imported sounds are links to the user's files (loops by their length only)");
+
+    const auto again = library.importFolder (pack, nullptr);
+    check (again.total() == 0 && again.skipped == 5, "importing the same folder again adds nothing");
+
+    const auto pad = library.inFolder (unsortedFolder)[0];
+    check (library.moveToFolder (unsortedFolder, pad, (int) Instrument::Snare) && library.inFolder (unsortedFolder).empty()
+               && library.samples (Instrument::Snare).size() == 1 && library.samples (Instrument::Snare)[0]->file == pad->file,
+           "a link moved to another folder");
+    const auto removed = library.samples (Instrument::Snare)[0];
+    check (library.remove ((int) Instrument::Snare, removed) && library.samples (Instrument::Snare).empty() && removed->file.existsAsFile(),
+           "removing a link forgets it, the user's file stays");
+
+    // Own files (copied in) move as files.
+    library.addFiles (unsortedFolder, { pack.getChildFile ("pad.wav") });
+    const auto own = library.inFolder (unsortedFolder)[0];
+    check (! own->linked && library.moveToFolder (unsortedFolder, own, (int) Instrument::Clap)
+               && library.samples (Instrument::Clap).size() == 1 && library.folderFor (Instrument::Clap).getChildFile ("pad.wav").existsAsFile()
+               && ! own->file.existsAsFile(),
+           "a sound of the library's own moves as a file");
+
+    // A linked file that disappears is skipped, its link kept.
+    pack.getChildFile ("Big Kick.wav").deleteFile();
+    library.rescan();
+    check (library.samples (Instrument::Kick).size() == 1 && library.missingLinks() == 1, "a missing linked file is left out, not lost");
+    pack.deleteRecursively();
+    root.deleteRecursively();
+}
+
+// "Import a folder" on a folder of sounds: what goes where and why, one
+// line per file (the folder a file is in is printed too, to compare).
+int sortFolder (const juce::File& top)
+{
+    for (const auto& f : top.findChildFiles (juce::File::findFiles, true, supportedWildcard()))
+    {
+        juce::String error;
+        auto loaded = loadAudioFile (f, error, 12.0);
+        if (! loaded)
+            continue;
+        const auto r = sortSound (f, top, loaded->audio, loaded->sampleRate);
+        const auto bySound = instrumentFromSound (loaded->audio, loaded->sampleRate);
+        std::printf ("%-12s | %-14s %-12s | sound %-14s | %s | %s\n", f.getParentDirectory().getFileName().toRawUTF8(),
+                     r.as == SortedAs::Loop ? "Loops" : r.as == SortedAs::Unsorted ? "Unsorted" : instrumentName (r.instrument),
+                     r.why.toRawUTF8(), bySound ? instrumentName (*bySound) : "-",
+                     describeSound (loaded->audio, loaded->sampleRate).toRawUTF8(), f.getFileName().toRawUTF8());
+    }
+    return 0;
+}
+
 int main (int argc, char** argv)
 {
+    for (int i = 1; i + 1 < argc; ++i)
+        if (juce::String (argv[i]) == "--sort")
+            return sortFolder (juce::File::getCurrentWorkingDirectory().getChildFile (argv[i + 1]));
     for (int i = 1; i + 1 < argc; ++i)
         if (juce::String (argv[i]) == "--analyse")
             return analyseFile (juce::File::getCurrentWorkingDirectory().getChildFile (argv[i + 1]));
@@ -783,6 +900,7 @@ int main (int argc, char** argv)
     checkHitGains();
     checkFindAttack();
     checkMaster();
+    checkImport();
     runAnalysis (writeDir);
 
     std::printf ("%s (%d failed checks)\n", failures == 0 ? "OK" : "FAILED", failures);

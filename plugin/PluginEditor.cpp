@@ -3,6 +3,7 @@
 #include "MidiEditorView.h"
 #include "Theme.h"
 
+#include <atomic>
 #include <cmath>
 
 namespace
@@ -117,6 +118,7 @@ private:
 // Enter, or "Open this beat") to analyse it.
 class ImportPage : public juce::Component,
                    private juce::FileBrowserListener,
+                   private juce::ListBoxModel,
                    private juce::Timer
 {
 public:
@@ -133,6 +135,20 @@ public:
         browser.addListener (this);
         browser.setFilenameBoxLabel ("File:");
         addAndMakeVisible (browser);
+
+        // Hosted (Adormis Audio): its open files, above the folders.
+        if (processor.hostBeats != nullptr)
+        {
+            setupLabel (hostTitle, theme::text, 14.0f);
+            hostTitle.setText ("Open in " + processor.hostName + ": click = listen, double-click = open", juce::dontSendNotification);
+            hostList.setModel (this);
+            hostList.setRowHeight (24);
+            hostList.setColour (juce::ListBox::backgroundColourId, theme::panel);
+            hostList.setWantsKeyboardFocus (false);
+            addAndMakeVisible (hostTitle);
+            addAndMakeVisible (hostList);
+            refreshHostBeats();
+        }
         addAndMakeVisible (wave);
 
         for (auto* b : { &playButton, &openButton })
@@ -242,7 +258,14 @@ public:
     void resized() override
     {
         auto r = getLocalBounds().reduced (12);
-        browser.setBounds (r.removeFromLeft (r.getWidth() * 11 / 20));
+        auto left = r.removeFromLeft (r.getWidth() * 11 / 20);
+        if (processor.hostBeats != nullptr)
+        {
+            hostTitle.setBounds (left.removeFromTop (22));
+            hostList.setBounds (left.removeFromTop (24 * juce::jlimit (2, 5, (int) hostBeats.size()) + 2));
+            left.removeFromTop (10);
+        }
+        browser.setBounds (left);
         r.removeFromLeft (16);
 
         title.setBounds (r.removeFromTop (28));
@@ -269,6 +292,63 @@ private:
     juce::TextButton playButton { "Play" }, openButton { "Open this beat" };
     juce::Label title, details, current, help;
     const drb::LoadedAudio* previewShown = nullptr;
+
+    // The host's open files (Adormis Audio), read again every second.
+    juce::Label hostTitle;
+    juce::ListBox hostList;
+    std::vector<DrumRebuilderProcessor::HostBeat> hostBeats;
+
+    void refreshHostBeats()
+    {
+        auto now = processor.hostBeats();
+        bool same = now.size() == hostBeats.size();
+        for (size_t i = 0; same && i < now.size(); ++i)
+            same = now[i].name == hostBeats[i].name;
+        hostBeats = std::move (now);
+        if (! same)
+        {
+            hostList.updateContent();
+            hostList.repaint();
+            resized();
+        }
+    }
+
+    juce::File hostFile (int row)
+    {
+        if (! juce::isPositiveAndBelow (row, (int) hostBeats.size()))
+            return {};
+        const auto f = hostBeats[(size_t) row].file();
+        if (f == juce::File())
+            current.setText ("Can't take \"" + hostBeats[(size_t) row].name + "\" from " + processor.hostName + " (closed?)",
+                             juce::dontSendNotification);
+        return f;
+    }
+
+    int getNumRows() override { return (int) hostBeats.size(); }
+
+    void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override
+    {
+        if (! juce::isPositiveAndBelow (row, (int) hostBeats.size()))
+            return;
+        if (selected)
+            g.fillAll (theme::panelLight);
+        g.setColour (theme::text);
+        g.setFont (juce::FontOptions (13.5f));
+        g.drawText (hostBeats[(size_t) row].name, 10, 0, w - 20, h, juce::Justification::centredLeft, true);
+    }
+
+    void listBoxItemClicked (int row, const juce::MouseEvent&) override
+    {
+        browser.deselectAllFiles();
+        if (const auto f = hostFile (row); f.existsAsFile())
+            processor.previewFile (f);
+    }
+
+    void listBoxItemDoubleClicked (int row, const juce::MouseEvent&) override
+    {
+        if (const auto f = hostFile (row); f.existsAsFile())
+            open (f);
+    }
 
     static juce::File startFolder (DrumRebuilderProcessor& p)
     {
@@ -319,10 +399,12 @@ private:
         playheadWasMoving = p.isPlaying();
         if (inDialog && ++ticks % 6 == 0)   // the editor updates its own page
             update();
+        if (processor.hostBeats != nullptr && ++hostTicks % 30 == 0)
+            refreshHostBeats();
     }
 
     bool playheadWasMoving = false;
-    int ticks = 0;
+    int ticks = 0, hostTicks = 0;
 };
 
 // The Open window: the Import page's browser over the whole editor, inside
@@ -629,7 +711,7 @@ public:
 
         setupLabel (hint, theme::textDim, 12.5f);
         hint.setText ("Top: click a name: what it really is    Bottom: drag the ends of a bar: IN / OUT    Ctrl + click / Shift + drag: select several, click one: change all    Double-click an empty spot: add a hit, on a marker: delete it    Drag a marker: move it"
-                      "    Wheel, Up / Down: zoom    Space: play / stop (only the solo ones)",
+                      "    With instruments on solo only theirs can be changed    Wheel, Up / Down: zoom    Space: play / stop (only the solo ones)",
                       juce::dontSendNotification);
         hint.setJustificationType (juce::Justification::centredRight);
         addAndMakeVisible (hint);
@@ -845,12 +927,13 @@ class SampleBrowserPage : public juce::Component,
                           public juce::FileDragAndDropTarget,
                           public juce::DragAndDropContainer,
                           public juce::DragAndDropTarget,
-                          private juce::ListBoxModel
+                          private juce::ListBoxModel,
+                          private juce::Timer
 {
 public:
     explicit SampleBrowserPage (DrumRebuilderProcessor& p) : processor (p)
     {
-        for (auto* b : { &saveButton, &addButton, &useButton, &trashButton, &openFolderButton, &changeFolderButton, &rescanButton })
+        for (auto* b : { &saveButton, &importButton, &addButton, &useButton, &trashButton, &openFolderButton, &changeFolderButton, &rescanButton })
         {
             b->setWantsKeyboardFocus (false);
             addAndMakeVisible (b);
@@ -864,25 +947,30 @@ public:
                                   : juce::String ("Nothing saved: open a beat first"),
                             juce::dontSendNotification);
         };
+        importButton.onClick = [this] { job != nullptr ? stopImport() : importFolder(); };
         addButton.onClick = [this] { addSounds(); };
         useButton.onClick = [this]
         {
-            if (auto s = selectedSample())
+            if (auto s = selectedSample(); s != nullptr && isInstrumentFolder())
                 processor.setFixedSample (instrument(), s->file);
         };
         trashButton.onClick = [this]
         {
             if (auto s = selectedSample())
             {
-                s->file.moveToTrash();
+                const bool linked = s->linked;
+                processor.getLibrary().remove (folder(), s);
                 processor.rescanLibrary();
+                result.setText (linked ? "Removed from the library (your file is still where it was)" : "Moved to the trash",
+                                juce::dontSendNotification);
+                update();
             }
         };
         openFolderButton.onClick = [this]
         {
-            const auto folder = processor.getLibrary().folderFor (instrument());
-            folder.createDirectory();
-            folder.startAsProcess();
+            const auto dir = processor.getLibrary().folderAt (folder());
+            dir.createDirectory();
+            dir.startAsProcess();
         };
         changeFolderButton.onClick = [this] { changeFolder(); };
         rescanButton.onClick = [this] { processor.rescanLibrary(); };
@@ -904,9 +992,10 @@ public:
         setupLabel (result, theme::accent, 14.0f);
         help.setJustificationType (juce::Justification::topLeft);
         help.setText ("The sounds in each instrument's folder. Click = listen (Space too). Up / Down: the next sound, it plays; "
-                      "Left: to the folders (Up / Down between them), Right: into the folder. Drag sound files from your file manager onto an "
-                      "instrument to add them; drag a sound up / down to put it in your order (right-click: put first). "
-                      "The orange button saves every hit of this beat (cut between its IN and OUT) as \"<beat> (original) 01.wav\".",
+                      "Left: to the folders (Up / Down between them), Right: into the folder. Drag a sound onto another folder on the left "
+                      "to move it there (in the wrong place after an import?), up / down to put it in your order (right-click: more). "
+                      "Drag sound files from your file manager onto an instrument to copy them in. \"Import a folder\" sorts a whole folder "
+                      "of sounds by their names (else by how they sound) and links them: your files stay where they are.",
                       juce::dontSendNotification);
         for (auto* l : { &rootLabel, &help, &result })
             addAndMakeVisible (l);
@@ -946,7 +1035,7 @@ public:
         const int delta = key == juce::KeyPress::upKey ? -1 : 1;
         if (inFolders)
         {
-            const int row = juce::jlimit (0, drb::numInstruments - 1, instruments.getSelectedRow() + delta);
+            const int row = juce::jlimit (0, drb::numFolders - 1, instruments.getSelectedRow() + delta);
             instruments.selectRow (row);   // its sounds show on the right
         }
         else
@@ -963,7 +1052,7 @@ public:
         const int row = sounds.getSelectedRow() < 0 ? (delta > 0 ? 0 : n - 1)
                                                     : juce::jlimit (0, n - 1, sounds.getSelectedRow() + delta);
         sounds.selectRow (row);   // scrolls it into view
-        processor.previewSample (*processor.getLibrary().samples (instrument())[(size_t) row]);
+        processor.previewSample (*shown()[(size_t) row]);
         update();
     }
 
@@ -980,15 +1069,20 @@ public:
 
     void update()
     {
-        rootLabel.setText ("Library: " + processor.getLibrary().getRoot().getFullPathName(), juce::dontSendNotification);
+        const int missing = processor.getLibrary().missingLinks();
+        rootLabel.setText ("Library: " + processor.getLibrary().getRoot().getFullPathName()
+                               + (missing > 0 ? "   (" + juce::String (missing) + " linked sounds not found: moved or deleted?)" : juce::String()),
+                           juce::dontSendNotification);
         saveButton.setEnabled (processor.getLoaded() != nullptr && ! processor.getAnalysis().hits.empty());
         instruments.updateContent();
         sounds.updateContent();
         instruments.repaint();
         sounds.repaint();
-        const bool has = selectedSample() != nullptr;
-        useButton.setEnabled (has);
-        trashButton.setEnabled (has);
+        const auto selected = selectedSample();
+        useButton.setEnabled (selected != nullptr && isInstrumentFolder());
+        trashButton.setEnabled (selected != nullptr);
+        trashButton.setButtonText (selected != nullptr && selected->linked ? "Remove" : "Move to trash");
+        trashButton.setTooltip (selected != nullptr && selected->linked ? "Takes it out of the library; your file stays where it is" : "");
     }
 
     // Sound files dropped from outside: onto an instrument (or the list of
@@ -1017,14 +1111,13 @@ public:
     {
         const int row = dropInstrumentAt ({ x, y });
         fileTarget = -1;
-        const auto inst = drb::allInstruments[(size_t) row];
         juce::Array<juce::File> list;
         for (const auto& f : files)
             list.add (juce::File (f));
-        const int n = processor.getLibrary().addFiles (inst, list);
+        const int n = processor.getLibrary().addFiles (row, list);
         processor.rescanLibrary();
         instruments.selectRow (row);
-        result.setText (juce::String (n) + (n == 1 ? " sound added to " : " sounds added to ") + drb::instrumentName (inst),
+        result.setText (juce::String (n) + (n == 1 ? " sound added to " : " sounds added to ") + drb::folderName (row),
                         juce::dontSendNotification);
         update();
         repaint();
@@ -1032,25 +1125,35 @@ public:
 
     // A sound dragged up / down in the list: the new order.
     bool isInterestedInDragSource (const SourceDetails& d) override { return d.description.toString().startsWith ("sample:"); }
+    // Over the folders on the left = into that folder; over the sounds =
+    // a new place in the order.
     void itemDragMove (const SourceDetails& d) override
     {
-        if (const int i = insertionAt (d.localPosition); i != dropIndex)
+        const int target = folderAt (d.localPosition);
+        const int i = target >= 0 ? -1 : insertionAt (d.localPosition);
+        if (i != dropIndex || target != folderTarget)
         {
             dropIndex = i;
+            folderTarget = target;
             repaint();
         }
     }
     void itemDragExit (const SourceDetails&) override
     {
         dropIndex = -1;
+        folderTarget = -1;
         repaint();
     }
     void itemDropped (const SourceDetails& d) override
     {
         const int from = d.description.toString().fromFirstOccurrenceOf (":", false, false).getIntValue();
-        int to = insertionAt (d.localPosition);
+        const int target = folderAt (d.localPosition);
+        int to = target >= 0 ? -1 : insertionAt (d.localPosition);
         dropIndex = -1;
-        if (to >= 0)
+        folderTarget = -1;
+        if (target >= 0)
+            moveToFolder (from, target);
+        else if (to >= 0)
         {
             if (to > from)
                 --to;
@@ -1082,8 +1185,16 @@ public:
             g.drawRect (row, 2);
             g.drawRect (sounds.getBounds(), 2);
             g.setFont (juce::FontOptions (16.0f, juce::Font::bold));
-            g.drawText (juce::String ("Drop: add to ") + drb::instrumentName (drb::allInstruments[(size_t) fileTarget]),
-                        sounds.getBounds().reduced (10), juce::Justification::centredBottom);
+            g.drawText ("Drop: add to " + drb::folderName (fileTarget), sounds.getBounds().reduced (10), juce::Justification::centredBottom);
+        }
+        // Where a dragged sound would move to: that folder.
+        if (folderTarget >= 0)
+        {
+            const auto row = instruments.getRowPosition (folderTarget, true).translated (instruments.getX(), instruments.getY());
+            g.setColour (theme::accent.withAlpha (0.25f));
+            g.fillRect (row);
+            g.setColour (theme::accent);
+            g.drawRect (row, 2);
         }
     }
 
@@ -1094,6 +1205,8 @@ public:
         auto r = getLocalBounds().reduced (12);
         auto top = r.removeFromTop (30);
         saveButton.setBounds (top.removeFromLeft (250));
+        top.removeFromLeft (8);
+        importButton.setBounds (top.removeFromLeft (170));
         top.removeFromLeft (12);
         result.setBounds (top);
         r.removeFromTop (4);
@@ -1122,21 +1235,21 @@ public:
 private:
     DrumRebuilderProcessor& processor;
     juce::ListBox instruments, sounds;
-    juce::TextButton saveButton { "Save this beat's original sounds" }, addButton { "Add sounds..." },
+    juce::TextButton saveButton { "Save this beat's original sounds" }, importButton { "Import a folder..." }, addButton { "Add sounds..." },
                      useButton { "Use for the rebuild" }, trashButton { "Move to trash" }, openFolderButton { "Open folder" },
                      changeFolderButton { "Change library..." }, rescanButton { "Rescan" };
     juce::Label rootLabel, help, result;
     std::unique_ptr<juce::FileChooser> chooser;
 
-    drb::Instrument instrument() const
-    {
-        const int row = juce::jlimit (0, drb::numInstruments - 1, instruments.getSelectedRow());
-        return drb::allInstruments[(size_t) row];
-    }
+    // The folder shown: an instrument's, or Unsorted / Loops.
+    int folder() const { return juce::jlimit (0, drb::numFolders - 1, instruments.getSelectedRow()); }
+    bool isInstrumentFolder() const { return folder() < drb::numInstruments; }
+    drb::Instrument instrument() const { return drb::allInstruments[(size_t) juce::jmin (folder(), drb::numInstruments - 1)]; }
+    const std::vector<drb::SamplePtr>& shown() const { return processor.getLibrary().inFolder (folder()); }
 
     drb::SamplePtr selectedSample() const
     {
-        const auto& list = processor.getLibrary().samples (instrument());
+        const auto& list = shown();
         const int row = sounds.getSelectedRow();
         return juce::isPositiveAndBelow (row, (int) list.size()) ? list[(size_t) row] : nullptr;
     }
@@ -1144,15 +1257,23 @@ private:
     bool inFolders = false;   // the arrows move in the instruments (left) list
     int dropIndex = -1;    // where a dragged sound would go
     int fileTarget = -1;   // the instrument dropped files would go to
+    int folderTarget = -1; // the folder a dragged sound would move to
 
     // The instrument row under a point (on the sounds: the shown one).
     int dropInstrumentAt (juce::Point<int> p) const
     {
+        const int row = folderAt (p);
+        return row >= 0 ? row : folder();
+    }
+
+    // The folder row under a point, -1 when not on the left list.
+    int folderAt (juce::Point<int> p) const
+    {
         const auto q = instruments.getLocalPoint (this, p);
         if (instruments.getLocalBounds().contains (q))
-            if (const int row = instruments.getRowContainingPosition (q.x, q.y); juce::isPositiveAndBelow (row, drb::numInstruments))
+            if (const int row = instruments.getRowContainingPosition (q.x, q.y); juce::isPositiveAndBelow (row, drb::numFolders))
                 return row;
-        return juce::jlimit (0, drb::numInstruments - 1, instruments.getSelectedRow());
+        return -1;
     }
 
     int insertionAt (juce::Point<int> p) const
@@ -1161,15 +1282,131 @@ private:
         if (! sounds.getLocalBounds().contains (q))
             return -1;
         const int i = sounds.getInsertionIndexForPosition (q.x, q.y);
-        return i < 0 ? (int) processor.getLibrary().samples (instrument()).size() : i;
+        return i < 0 ? (int) shown().size() : i;
     }
 
     void moveSound (int from, int to)
     {
-        processor.moveSample (instrument(), from, to);
+        processor.moveSample (folder(), from, to);
         sounds.selectRow (juce::jlimit (0, getNumRows() - 1, to));
         update();
     }
+
+    // A sound into another folder (it was put in the wrong one).
+    void moveToFolder (int row, int target)
+    {
+        const auto& list = shown();
+        if (! juce::isPositiveAndBelow (row, (int) list.size()) || target == folder())
+            return;
+        const auto s = list[(size_t) row];
+        if (processor.getLibrary().moveToFolder (folder(), s, target))
+            result.setText ("\"" + s->file.getFileNameWithoutExtension() + "\" moved to " + drb::folderName (target),
+                            juce::dontSendNotification);
+        processor.rescanLibrary();
+        sounds.selectRow (juce::jlimit (-1, getNumRows() - 1, row));
+        update();
+    }
+
+    // --- Import a folder (on a background thread; the button stops it) ---
+
+    struct ImportJob : public juce::Thread
+    {
+        ImportJob (const drb::SampleLibrary& l, const juce::File& d) : juce::Thread ("Import sounds"), library (l), dir (d) {}
+        void run() override
+        {
+            summary = library.importFolder (dir, [this] (int d, int t)
+            {
+                done = d;
+                total = t;
+                return ! threadShouldExit();
+            });
+            finished = true;
+        }
+        const drb::SampleLibrary& library;
+        const juce::File dir;
+        drb::SampleLibrary::ImportSummary summary;
+        std::atomic<int> done { 0 }, total { 0 };
+        std::atomic<bool> finished { false };
+    };
+    std::unique_ptr<ImportJob> job;
+
+    void importFolder()
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Import a folder of sounds (they stay where they are)",
+                                                       juce::File::getSpecialLocation (juce::File::userMusicDirectory));
+        juce::Component::SafePointer<SampleBrowserPage> self (this);
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                              [self] (const juce::FileChooser& fc)
+                              {
+                                  if (self != nullptr && fc.getResult().isDirectory())
+                                      self->startImport (fc.getResult());
+                              });
+    }
+
+  public:
+    void startImport (const juce::File& dir)
+    {
+        if (job != nullptr)
+            return;
+        job = std::make_unique<ImportJob> (processor.getLibrary(), dir);
+        job->startThread();
+        importButton.setButtonText ("Stop import");
+        result.setText ("Looking at the sounds in " + dir.getFileName() + "...", juce::dontSendNotification);
+        startTimer (100);
+    }
+
+  private:
+    void stopImport()
+    {
+        if (job != nullptr)
+            job->signalThreadShouldExit();
+    }
+
+    void timerCallback() override
+    {
+        if (job == nullptr)
+        {
+            stopTimer();
+            return;
+        }
+        if (! job->finished)
+        {
+            if (job->total > 0)
+                result.setText ("Importing: " + juce::String (job->done.load()) + " of " + juce::String (job->total.load()) + " sounds"
+                                    + (job->threadShouldExit() ? " (stopping...)" : ""),
+                                juce::dontSendNotification);
+            return;
+        }
+        stopTimer();
+        job->stopThread (1000);
+        const auto summary = job->summary;
+        job.reset();
+        importButton.setButtonText ("Import a folder...");
+        processor.rescanLibrary();
+
+        juce::StringArray parts;
+        for (int f = 0; f < drb::numFolders; ++f)
+            if (summary.added[(size_t) f] > 0)
+                parts.add (drb::folderName (f) + " " + juce::String (summary.added[(size_t) f]));
+        juce::String text = summary.stopped ? "Stopped. " : "";
+        text << (summary.total() == 0 ? juce::String ("No new sounds")
+                                      : juce::String (summary.total()) + " sounds linked: " + parts.joinIntoString (", "));
+        if (summary.skipped > 0)
+            text << " (" << summary.skipped << " already in the library or unreadable)";
+        if (summary.total() > 0)
+            text << ". Check each folder; drag a wrong one onto the right folder.";
+        result.setText (text, juce::dontSendNotification);
+        update();
+    }
+
+  public:
+    ~SampleBrowserPage() override
+    {
+        if (job != nullptr)
+            job->stopThread (5000);
+    }
+
+  private:
 
     juce::var getDragSourceDescription (const juce::SparseSet<int>& rows) override
     {
@@ -1180,19 +1417,25 @@ private:
     struct InstrumentModel : public juce::ListBoxModel
     {
         SampleBrowserPage* owner = nullptr;
-        int getNumRows() override { return drb::numInstruments; }
+        int getNumRows() override { return drb::numFolders; }
         void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override
         {
-            const auto inst = drb::allInstruments[(size_t) row];
+            const bool instrumentRow = row < drb::numInstruments;
             if (selected)
                 g.fillAll (theme::panelLight);
-            g.setColour (theme::instrument (inst));
+            if (row == drb::unsortedFolder)   // a line between the instruments and these two
+            {
+                g.setColour (theme::textDim.withAlpha (0.5f));
+                g.fillRect (0, 0, w, 1);
+            }
+            g.setColour (instrumentRow ? theme::instrument (drb::allInstruments[(size_t) row]) : theme::textDim);
             g.fillRect (6, 6, 4, h - 12);
-            g.setFont (juce::FontOptions (14.0f, juce::Font::bold));
-            g.drawText (drb::instrumentName (inst), 18, 0, w - 70, h, juce::Justification::centredLeft);
+            g.setColour (instrumentRow ? theme::text : theme::textDim);
+            g.setFont (juce::FontOptions (14.0f, instrumentRow ? juce::Font::bold : juce::Font::italic));
+            g.drawText (drb::folderName (row), 18, 0, w - 70, h, juce::Justification::centredLeft);
             g.setColour (theme::textDim);
             g.setFont (juce::FontOptions (12.0f));
-            g.drawText (juce::String ((int) owner->processor.getLibrary().samples (inst).size()), w - 50, 0, 40, h,
+            g.drawText (juce::String ((int) owner->processor.getLibrary().inFolder (row).size()), w - 50, 0, 40, h,
                         juce::Justification::centredRight);
         }
         void selectedRowsChanged (int) override
@@ -1208,18 +1451,19 @@ private:
     } instrumentModel;
 
     // Right: the selected instrument's sounds. Click = listen.
-    int getNumRows() override { return (int) processor.getLibrary().samples (instrument()).size(); }
+    int getNumRows() override { return (int) shown().size(); }
 
     void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override
     {
-        const auto& list = processor.getLibrary().samples (instrument());
+        const auto& list = shown();
         if (! juce::isPositiveAndBelow (row, (int) list.size()))
             return;
         const auto& s = *list[(size_t) row];
         if (selected)
             g.fillAll (theme::panelLight);
 
-        const bool inUse = processor.getFixedSample (instrument()) != nullptr && processor.getFixedSample (instrument())->file == s.file;
+        const bool inUse = isInstrumentFolder() && processor.getFixedSample (instrument()) != nullptr
+                        && processor.getFixedSample (instrument())->file == s.file;
         auto r = juce::Rectangle<int> (0, 0, w, h).reduced (10, 0);
         if (s.original)
         {
@@ -1233,14 +1477,22 @@ private:
         }
         g.setColour (inUse ? theme::accent : theme::text);
         g.setFont (juce::FontOptions (13.5f, inUse ? juce::Font::bold : juce::Font::plain));
-        const auto info = juce::String (s.audio.getNumSamples() / s.sampleRate, 2) + " s" + (inUse ? "   in use" : "");
+        const auto info = juce::String (s.seconds, 2) + " s" + (inUse ? "   in use" : "");
         g.drawText (info, r.removeFromRight (120), juce::Justification::centredRight);
+        if (s.linked)   // a link: the folder the file is in, dimmed
+        {
+            g.setColour (theme::textDim);
+            g.setFont (juce::FontOptions (11.5f));
+            g.drawText ("in " + s.file.getParentDirectory().getFileName(), r.removeFromRight (180), juce::Justification::centredRight, true);
+            g.setColour (inUse ? theme::accent : theme::text);
+            g.setFont (juce::FontOptions (13.5f, inUse ? juce::Font::bold : juce::Font::plain));
+        }
         g.drawText (s.file.getFileNameWithoutExtension(), r, juce::Justification::centredLeft, true);
     }
 
     void listBoxItemClicked (int row, const juce::MouseEvent& e) override
     {
-        const auto& list = processor.getLibrary().samples (instrument());
+        const auto& list = shown();
         if (! juce::isPositiveAndBelow (row, (int) list.size()))
             return;
         inFolders = false;
@@ -1263,20 +1515,30 @@ private:
         menu.addItem ("Move up", row > 0, false, [self, row] { if (self != nullptr) self->moveSound (row, row - 1); });
         menu.addItem ("Move down", row < n - 1, false, [self, row] { if (self != nullptr) self->moveSound (row, row + 1); });
         menu.addItem ("Put last", row < n - 1, false, [self, row, n] { if (self != nullptr) self->moveSound (row, n - 1); });
+        juce::PopupMenu to;
+        for (int f = 0; f < drb::numFolders; ++f)
+            if (f != folder())
+            {
+                if (f == drb::unsortedFolder)
+                    to.addSeparator();
+                to.addItem (drb::folderName (f), [self, row, f] { if (self != nullptr) self->moveToFolder (row, f); });
+            }
+        menu.addSeparator();
+        menu.addSubMenu ("Move to", to);
         menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&sounds).withMousePosition(), focus::afterMenu (this));
     }
 
     void listBoxItemDoubleClicked (int row, const juce::MouseEvent&) override
     {
-        const auto& list = processor.getLibrary().samples (instrument());
-        if (juce::isPositiveAndBelow (row, (int) list.size()))
+        const auto& list = shown();
+        if (isInstrumentFolder() && juce::isPositiveAndBelow (row, (int) list.size()))
             processor.setFixedSample (instrument(), list[(size_t) row]->file);
     }
 
     void addSounds()
     {
-        const auto inst = instrument();
-        chooser = std::make_unique<juce::FileChooser> ("Add sounds to " + juce::String (drb::instrumentName (inst)),
+        const auto inst = folder();
+        chooser = std::make_unique<juce::FileChooser> ("Add sounds to " + drb::folderName (inst),
                                                        juce::File::getSpecialLocation (juce::File::userMusicDirectory),
                                                        drb::supportedWildcard());
         juce::Component::SafePointer<SampleBrowserPage> self (this);
@@ -1288,7 +1550,7 @@ private:
                                       return;
                                   const int n = self->processor.getLibrary().addFiles (inst, fc.getResults());
                                   self->processor.rescanLibrary();
-                                  self->result.setText (juce::String (n) + " sounds added to " + drb::instrumentName (inst),
+                                  self->result.setText (juce::String (n) + " sounds added to " + drb::folderName (inst),
                                                         juce::dontSendNotification);
                               });
     }
