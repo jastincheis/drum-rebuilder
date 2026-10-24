@@ -135,6 +135,11 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
         const auto& plan = settings.instruments[(size_t) hit.instrument];
         const bool useOriginal = plan.mode == PickMode::Original || plan.pool.empty();
 
+        if (useOriginal && plan.muted)
+        {
+            done[h] = true;
+            continue;
+        }
         if (useOriginal)
         {
             // Every original hit at this same moment: their cuts are the same
@@ -144,7 +149,7 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
             for (size_t g = h; g < hits.size() && hits[g].time < hit.time + 1.0e-9; ++g)
             {
                 const auto& p = settings.instruments[(size_t) hits[g].instrument];
-                if (! done[g] && (p.mode == PickMode::Original || p.pool.empty())
+                if (! done[g] && ! p.muted && (p.mode == PickMode::Original || p.pool.empty())
                     && std::abs (hits[g].sourceTime() - hit.sourceTime()) < 1.0e-9)
                     group.push_back (g);
             }
@@ -199,6 +204,8 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
             }
             case PickMode::Original: break;
         }
+        if (plan.muted)
+            continue;   // picked all the same, so Random / Round robin stay as they were
 
         const auto& sample = *pool[(size_t) index];
         const float target = refPeak[(size_t) hit.instrument] > 0.0f ? refPeak[(size_t) hit.instrument] * hit.velocity : hit.velocity;

@@ -35,6 +35,7 @@ struct InstrumentPlan
     double maxLength = 0.0;        // where a sound stops (OUT), seconds from its start (0 = all of it), then fades out
     double startAt = 0.0;          // where it starts (IN), seconds from its start: that part is skipped, and
                                    // what is left begins at the hit
+    bool muted = false;            // not heard (the others' sounds stay the same)
 };
 
 struct RebuildSettings

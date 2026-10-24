@@ -92,9 +92,18 @@ void BeatWaveformView::buildPeaks()
     }
 }
 
+// The recording, or up to the end of the last bar when that is a bit
+// later (bar 1 found a few ms in): the END flag stays in view.
+double BeatWaveformView::shownLength() const
+{
+    if (duration <= 0.0 || processor.getAnalysis().grid.bpm <= 0.0)
+        return duration;
+    return std::max (duration, std::min (processor.barRange().getEnd(), duration + 1.0));
+}
+
 void BeatWaveformView::setView (double start, double end)
 {
-    const double total = std::max (duration, minViewSeconds);
+    const double total = std::max (shownLength(), minViewSeconds);
     double len = juce::jlimit (minViewSeconds, total, end - start);
     start = juce::jlimit (0.0, total - len, start);
     viewStart = start;
@@ -107,7 +116,7 @@ void BeatWaveformView::setView (double start, double end)
 
 void BeatWaveformView::zoomToFit()
 {
-    setView (0.0, std::max (duration, minViewSeconds));
+    setView (0.0, std::max (shownLength(), minViewSeconds));
 }
 
 void BeatWaveformView::zoomBy (double factor, double around)
@@ -508,6 +517,21 @@ void BeatWaveformView::paint (juce::Graphics& g)
         g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
         g.drawText ("1 START", juce::Rectangle<float> (x + 3.0f, 1.0f, 45.0f, (float) rulerHeight - 3.0f),
                     juce::Justification::centredLeft);
+    }
+
+    // The end of the last bar: the same line, its flag to the left of it.
+    const double barsEnd = processor.barRange().getEnd();
+    if (grid.bpm > 0.0 && grid.bars > 0 && barsEnd >= viewStart && barsEnd <= viewEnd)
+    {
+        const float x = secondsToX (barsEnd);
+        g.setColour (theme::startFlag.withAlpha (0.8f));
+        g.fillRect (juce::Rectangle<float> (x - 0.75f, 0.0f, 1.5f, (float) area.getBottom()));
+        g.setColour (theme::startFlag);
+        g.fillRect (juce::Rectangle<float> (x - 34.0f, 1.0f, 34.0f, (float) rulerHeight - 3.0f));
+        g.setColour (juce::Colours::black);
+        g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+        g.drawText ("END", juce::Rectangle<float> (x - 34.0f, 1.0f, 31.0f, (float) rulerHeight - 3.0f),
+                    juce::Justification::centredRight);
     }
 
     // Playhead (the checked instrument's, while listening to it).

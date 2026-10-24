@@ -24,7 +24,9 @@ std::optional<LoadedAudio> loadAudioFile (const juce::File&, juce::String& error
 
 // Writes a WAV file (24-bit by default), through a temporary file so a
 // failed write never leaves half a file behind.
-bool writeWav (const juce::File&, const juce::AudioBuffer<float>&, double sampleRate, int bitsPerSample = 24);
+// `cues`: named markers (sample positions) written into the file.
+bool writeWav (const juce::File&, const juce::AudioBuffer<float>&, double sampleRate, int bitsPerSample = 24,
+               const std::vector<std::pair<juce::String, juce::int64>>& cues = {});
 
 // High-quality copy at another sample rate, for playback on a device that
 // runs at a different rate than the file.

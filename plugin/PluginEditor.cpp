@@ -1833,7 +1833,15 @@ public:
         listen.onClick = [this] { length.listen(); };
         change.onClick = [this] { processor.setChanging (instrument, change.getToggleState()); };
         change.setTooltip ("Ticked: Next sounds / Right arrow gives this instrument another sound from its folder");
-        for (auto* c : std::initializer_list<juce::Component*> { &change, &mode, &sound, &listen })
+        mute.setClickingTogglesState (true);
+        mute.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffc0392b));
+        mute.setTooltip ("Mute: this instrument is left out of the rebuilt beat (B) and its export");
+        mute.onClick = [this]
+        {
+            processor.setMuted (instrument, mute.getToggleState());
+            repaint();
+        };
+        for (auto* c : std::initializer_list<juce::Component*> { &change, &mode, &sound, &mute, &listen })
         {
             c->setWantsKeyboardFocus (false);
             addAndMakeVisible (c);
@@ -1865,6 +1873,7 @@ public:
         sound.setEnabled (m == drb::PickMode::Fixed && ! pool.empty());
         length.update();
         listen.setEnabled (processor.getRowSound (instrument) != nullptr);
+        mute.setToggleState (processor.getMuted (instrument), juce::dontSendNotification);
 
         int hits = 0;
         for (const auto& h : processor.getAnalysis().hits)
@@ -1884,7 +1893,8 @@ public:
     {
         g.setColour (theme::panel);
         g.fillRoundedRectangle (getLocalBounds().toFloat(), 6.0f);
-        g.setColour (theme::instrument (instrument));
+        const bool muted = processor.getMuted (instrument);
+        g.setColour (theme::instrument (instrument).withAlpha (muted ? 0.3f : 1.0f));
         g.fillRect (8, 8, 5, getHeight() - 16);
         g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
         g.drawText (drb::instrumentName (instrument), 46, 8, 120, 30, juce::Justification::centredLeft);
@@ -1902,6 +1912,8 @@ public:
         mode.setBounds (top.removeFromLeft (130));
         top.removeFromLeft (8);
         listen.setBounds (top.removeFromRight (70));
+        top.removeFromRight (6);
+        mute.setBounds (top.removeFromRight (60));
         top.removeFromRight (6);
         sound.setBounds (top);
         r.removeFromTop (4);
@@ -1922,7 +1934,7 @@ private:
     drb::Instrument instrument;
     juce::ToggleButton change;
     juce::ComboBox mode, sound;
-    juce::TextButton listen { "Listen" };
+    juce::TextButton listen { "Listen" }, mute { "Mute" };
     juce::Label info;
     SoundLengthView length;
 };
@@ -2335,7 +2347,7 @@ public:
         wavInfo.setText (processor.getLoaded() == nullptr ? juce::String()
                          : "The rebuilt beat (the Drum Rack's sounds" + juce::String (processor.getKeepPitch() ? ", tuned" : "")
                                + ", at " + juce::String (processor.getRebuildBpm(), 1) + " BPM), stereo 24-bit WAV at the "
-                               "recording's sample rate, with the last sounds ringing out.",
+                               "recording's sample rate, with the last sounds ringing out. Markers: bar 1 and the END of the last bar.",
                          juce::dontSendNotification);
     }
 
@@ -2404,7 +2416,7 @@ private:
     {
         wavResult.setText ("Rendering...", juce::dontSendNotification);
         juce::Component::SafePointer<ExportPage> self (this);
-        processor.renderRebuilt ([self] (bool ok, juce::AudioBuffer<float> beat, double rate)
+        processor.renderRebuilt ([self, markers = processor.rebuiltMarkers()] (bool ok, juce::AudioBuffer<float> beat, double rate)
         {
             if (self == nullptr)
                 return;
@@ -2413,7 +2425,7 @@ private:
                 self->wavResult.setText ("Could not render the beat", juce::dontSendNotification);
                 return;
             }
-            self->processor.sendToHost (std::move (beat), rate);
+            self->processor.sendToHost (std::move (beat), rate, markers);
             self->wavResult.setText ("Opened in " + self->processor.hostName + " as a new file", juce::dontSendNotification);
         });
     }

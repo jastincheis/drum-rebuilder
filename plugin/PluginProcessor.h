@@ -217,6 +217,9 @@ public:
     // Which instruments Next sounds changes (all at first).
     bool getChanging (drb::Instrument i) const { return changing[(size_t) i]; }
     void setChanging (drb::Instrument, bool);
+    // Muted: left out of the rebuilt beat (B) and its export.
+    bool getMuted (drb::Instrument i) const { return muted[(size_t) i]; }
+    void setMuted (drb::Instrument, bool);
     // Forward: the next sounds already heard, else new ones at random for
     // the ticked instruments. Back: the sounds before.
     void nextSounds();
@@ -260,10 +263,14 @@ public:
     // The same beat as exportRebuiltWav, handed back as audio (rendered on a
     // thread; `done` runs on the message thread).
     void renderRebuilt (std::function<void (bool ok, juce::AudioBuffer<float>, double sampleRate)> done);
+    // Where bar 1 starts and the last bar ends in that beat (seconds), named;
+    // they go into the exported file as markers. Bar 1 only when not at 0.
+    std::vector<std::pair<juce::String, double>> rebuiltMarkers() const;
+    juce::Range<double> barRange() const;   // bar 1 to the end of the last bar, recording seconds
 
     // Set by an app that has the editor inside it (Adormis Audio): the Export
     // tab then offers to open the rebuilt beat there.
-    std::function<void (juce::AudioBuffer<float>, double sampleRate)> sendToHost;
+    std::function<void (juce::AudioBuffer<float>, double sampleRate, std::vector<std::pair<juce::String, double>> markers)> sendToHost;
     juce::String hostName;
 
     // The beats open in the host (each file, each stem tab), to open one
@@ -304,6 +311,7 @@ private:
     std::array<juce::String, drb::numInstruments> rowSoundIds() const;
     std::array<juce::File, drb::numInstruments> fixedFiles;
     std::array<bool, drb::numInstruments> changing = [] { std::array<bool, drb::numInstruments> a; a.fill (true); return a; }();
+    std::array<bool, drb::numInstruments> muted {};
     struct SoundSet
     {
         std::array<drb::PickMode, drb::numInstruments> modes;
@@ -341,7 +349,6 @@ private:
     double timelineFactor() const { return listenRebuilt && rebuiltAtDevice != nullptr ? tempoFactor : 1.0; }
     void applyLoop();
     bool barLoop = false, loopingBeforeBarLoop = false;
-    juce::Range<double> barRange() const;   // bar 1 to the end of the last bar, recording seconds
     // The recording as it plays (A): each hit's stretch louder or softer
     // as its loudness was changed by hand.
     std::unique_ptr<juce::AudioBuffer<float>> originalWithGains() const;

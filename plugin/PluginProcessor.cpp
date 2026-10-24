@@ -572,6 +572,7 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
             p->soundHistory.clear();
             p->soundPos = 0;
             p->changing.fill (true);
+            p->muted.fill (false);
             if (restoring && p->pendingRebuild.isValid())
             {
                 const auto& r = p->pendingRebuild;
@@ -580,6 +581,7 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
                 const auto modes = r.getProperty ("modes").toString();
                 const auto files = juce::StringArray::fromTokens (r.getProperty ("fixed").toString(), "|", "");
                 const auto change = r.getProperty ("changing").toString();
+                const auto mutes = r.getProperty ("muted").toString();
                 const auto lengths = juce::StringArray::fromTokens (r.getProperty ("lengths").toString(), " ", "");
                 for (int i = 0; i < drb::numInstruments && i < lengths.size(); ++i)
                     p->soundLengths[(size_t) i] = juce::jlimit (0.0, 10.0, lengths[i].getDoubleValue());
@@ -595,6 +597,8 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
                         p->fixedFiles[(size_t) i] = juce::File (files[i]);
                     if (i < change.length())
                         p->changing[(size_t) i] = change[i] != '0';
+                    if (i < mutes.length())
+                        p->muted[(size_t) i] = mutes[i] == '1';
                 }
             }
             p->pendingRebuild = {};
@@ -1497,6 +1501,16 @@ void DrumRebuilderProcessor::setFixedSample (drb::Instrument i, const juce::File
     sendChangeMessage();
 }
 
+void DrumRebuilderProcessor::setMuted (drb::Instrument i, bool on)
+{
+    if (muted[(size_t) i] == on)
+        return;
+    muted[(size_t) i] = on;
+    scheduleBeatMemory();
+    requestRender();
+    sendChangeMessage();
+}
+
 void DrumRebuilderProcessor::setChanging (drb::Instrument i, bool on)
 {
     changing[(size_t) i] = on;
@@ -1719,6 +1733,7 @@ drb::RebuildSettings DrumRebuilderProcessor::makeRebuildSettings() const
         plan.mode = pickModes[(size_t) i];
         plan.maxLength = soundLengths[(size_t) i];
         plan.startAt = soundIns[(size_t) i];
+        plan.muted = muted[(size_t) i];
         if (plan.mode == drb::PickMode::Original)
             continue;
         plan.pool = getPool (i);
@@ -1831,9 +1846,22 @@ void DrumRebuilderProcessor::renderRebuilt (std::function<void (bool, juce::Audi
     });
 }
 
+std::vector<std::pair<juce::String, double>> DrumRebuilderProcessor::rebuiltMarkers() const
+{
+    std::vector<std::pair<juce::String, double>> list;
+    if (loaded == nullptr || analysis.grid.bpm <= 0.0)
+        return list;
+    const double f = std::clamp (tempoFactor, 0.25, 4.0);   // as in the render
+    const auto bars = barRange();
+    if (bars.getStart() > 0.001)
+        list.push_back ({ "1 START", bars.getStart() / f });
+    list.push_back ({ "END", bars.getEnd() / f });
+    return list;
+}
+
 void DrumRebuilderProcessor::exportRebuiltWav (const juce::File& file, std::function<void (bool)> done)
 {
-    renderRebuilt ([file, done = std::move (done)] (bool ok, juce::AudioBuffer<float> beat, double rate)
+    renderRebuilt ([file, done = std::move (done), markers = rebuiltMarkers()] (bool ok, juce::AudioBuffer<float> beat, double rate)
     {
         if (! ok)
         {
@@ -1841,9 +1869,12 @@ void DrumRebuilderProcessor::exportRebuiltWav (const juce::File& file, std::func
             return;
         }
         auto audio = std::make_shared<juce::AudioBuffer<float>> (std::move (beat));
-        juce::Thread::launch ([file, done, audio, rate]
+        std::vector<std::pair<juce::String, juce::int64>> cues;
+        for (const auto& [name, seconds] : markers)
+            cues.push_back ({ name, std::min ((juce::int64) std::llround (seconds * rate), (juce::int64) audio->getNumSamples()) });
+        juce::Thread::launch ([file, done, audio, rate, cues]
         {
-            const bool written = drb::writeWav (file, *audio, rate);
+            const bool written = drb::writeWav (file, *audio, rate, 24, cues);
             juce::MessageManager::callAsync ([done, written] { done (written); });
         });
     });
@@ -1902,17 +1933,19 @@ juce::ValueTree DrumRebuilderProcessor::makeBeatState() const
     }
 
     juce::ValueTree r ("Rebuild");
-    juce::String modes, change;
+    juce::String modes, change, mutes;
     juce::StringArray files;
     for (auto i : drb::allInstruments)
     {
         modes << (int) pickModes[(size_t) i];
         change << (changing[(size_t) i] ? "1" : "0");
+        mutes << (muted[(size_t) i] ? "1" : "0");
         files.add (fixedFiles[(size_t) i].getFullPathName());
     }
     r.setProperty ("modes", modes, nullptr);
     r.setProperty ("fixed", files.joinIntoString ("|"), nullptr);
     r.setProperty ("changing", change, nullptr);
+    r.setProperty ("muted", mutes, nullptr);
     r.setProperty ("keepPitch", keepPitch, nullptr);
     r.setProperty ("tempoFactor", tempoFactor, nullptr);
     juce::StringArray lengths;

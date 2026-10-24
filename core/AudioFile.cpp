@@ -81,8 +81,20 @@ juce::AudioBuffer<float> resample (const juce::AudioBuffer<float>& in, double fr
     return out;
 }
 
-bool writeWav (const juce::File& target, const juce::AudioBuffer<float>& audio, double sampleRate, int bitsPerSample)
+bool writeWav (const juce::File& target, const juce::AudioBuffer<float>& audio, double sampleRate, int bitsPerSample,
+               const std::vector<std::pair<juce::String, juce::int64>>& cues)
 {
+    std::unordered_map<juce::String, juce::String> meta;
+    for (size_t i = 0; i < cues.size(); ++i)
+    {
+        const auto c = "Cue" + juce::String ((int) i), l = "CueLabel" + juce::String ((int) i);
+        meta[c + "Identifier"] = meta[l + "Identifier"] = juce::String ((int) i + 1);
+        meta[c + "Offset"] = meta[c + "SampleOffset"] = juce::String (cues[i].second);
+        meta[l + "Text"] = cues[i].first;
+    }
+    if (! cues.empty())
+        meta["NumCuePoints"] = meta["NumCueLabels"] = juce::String ((int) cues.size());
+
     if (! target.getParentDirectory().createDirectory())
         return false;
 
@@ -96,7 +108,8 @@ bool writeWav (const juce::File& target, const juce::AudioBuffer<float>& audio, 
         auto writer = wav.createWriterFor (out, juce::AudioFormatWriterOptions()
                                                     .withSampleRate (sampleRate)
                                                     .withNumChannels (audio.getNumChannels())
-                                                    .withBitsPerSample (bitsPerSample));
+                                                    .withBitsPerSample (bitsPerSample)
+                                                    .withMetadataValues (meta));
         if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples()))
             return false;
     }

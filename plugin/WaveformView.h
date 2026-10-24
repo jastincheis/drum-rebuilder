@@ -63,6 +63,7 @@ private:
     std::vector<std::pair<float, float>> peaks;
     int peakBlock = 64;
     double sampleRate = 44100.0, duration = 0.0;
+    double shownLength() const;
     int shownId = -1;
 
     double viewStart = 0.0, viewEnd = 1.0;   // seconds

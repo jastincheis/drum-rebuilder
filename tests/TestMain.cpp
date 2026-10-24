@@ -170,6 +170,39 @@ void checkRebuild()
     }
     check (ref > 0.0 && err / ref < 1.0e-3, "rebuild from the originals = the beat (no doubled hits)");
 
+    // 1a. A muted instrument is left out; the others stay exactly the same
+    //     (kicks and snares only, never at the same moment here).
+    {
+        RebuildInput two;
+        two.audio = &beat.audio;
+        two.sampleRate = sr;
+        for (size_t i = 0; i < input.hits.size(); ++i)
+            if (input.hits[i].instrument == Instrument::Kick || input.hits[i].instrument == Instrument::Snare)
+            {
+                two.hits.push_back (input.hits[i]);
+                two.slices.push_back (input.slices[i]);
+            }
+        const auto all = renderRebuild (two, RebuildSettings(), sr, 0.0);
+        RebuildSettings mutedKick;
+        mutedKick.instruments[(size_t) Instrument::Kick].muted = true;
+        const auto out = renderRebuild (two, mutedKick, sr, 0.0);
+        float kickLeft = 0.0f, kickWas = 0.0f, snareDiff = 0.0f;
+        for (const auto& h : two.hits)
+        {
+            const int a = (int) (h.time * sr), n = (int) (0.01 * sr);
+            if (h.instrument == Instrument::Kick)
+            {
+                kickLeft = std::max (kickLeft, out.getMagnitude (0, a, n));
+                kickWas = std::max (kickWas, all.getMagnitude (0, a, n));
+            }
+            else
+                for (int k = a; k < a + n; ++k)
+                    snareDiff = std::max (snareDiff, std::abs (out.getSample (0, k) - all.getSample (0, k)));
+        }
+        check (kickWas > 0.1f && kickLeft < 0.01f * kickWas, "a muted instrument is not heard");
+        check (snareDiff < 1.0e-6f, "muting one instrument leaves the others as they were");
+    }
+
     // 1b. A kick moved by hand (MIDI editor) takes its sound along.
     {
         RebuildInput moved;
@@ -358,6 +391,24 @@ void checkRebuild()
 }
 
 // The metronome clicks exactly on the beats the player passes.
+// Markers written into an exported WAV come back with their names.
+void checkWavMarkers()
+{
+    juce::TemporaryFile temp (".wav");
+    juce::AudioBuffer<float> audio (2, 48000);
+    audio.clear();
+    check (writeWav (temp.getFile(), audio, 48000.0, 24, { { "1 START", 1200 }, { "END", 40000 } }), "WAV with markers written");
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (temp.getFile()));
+    check (reader != nullptr, "WAV with markers read");
+    if (reader == nullptr)
+        return;
+    const auto& m = reader->metadataValues;
+    check (m["NumCuePoints"] == "2", "two markers in the WAV");
+    check (m["Cue1Offset"] == "40000" && m["CueLabel1Text"] == "END", "END marker at its place");
+}
+
 void checkMetronome()
 {
     constexpr double rate = 48000.0;
@@ -901,6 +952,7 @@ int main (int argc, char** argv)
     checkFindAttack();
     checkMaster();
     checkImport();
+    checkWavMarkers();
     runAnalysis (writeDir);
 
     std::printf ("%s (%d failed checks)\n", failures == 0 ? "OK" : "FAILED", failures);
