@@ -237,10 +237,11 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
         Sample backwardsSample;
         if (plan.reversed)
         {
-            backwardsSample = picked;
+            backwardsSample = picked.withOwnAudio();
             backwardsSample.audio.reverse (0, backwardsSample.audio.getNumSamples());
         }
         const auto& sample = plan.reversed ? backwardsSample : picked;
+        const auto& sampleAudio = sample.getAudio();   // a library sound: read now, the first time
         const float target = refPeak[(size_t) hit.instrument] > 0.0f ? refPeak[(size_t) hit.instrument] * hit.velocity : hit.velocity;
         // Matched to the original's level, but a very quiet sound is not
         // blown up more than 2.5 times (it would bring its noise along).
@@ -251,22 +252,22 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
             pitch = std::clamp ((double) refPitch[(size_t) hit.instrument] / sample.pitch, 0.5, 2.0);
 
         // From the instrument's IN to its OUT, with short fades there.
-        int end = sample.audio.getNumSamples();
+        int end = sampleAudio.getNumSamples();
         if (plan.maxLength > 0.0 && plan.maxLength * sample.sampleRate < end)
             end = std::max (1, (int) std::ceil (plan.maxLength * sample.sampleRate));
         const int begin = std::clamp ((int) std::floor (plan.startAt * sample.sampleRate), 0, std::max (0, end - 4));
         std::vector<float> fade;
-        if (end < sample.audio.getNumSamples() || begin > 0)
+        if (end < sampleAudio.getNumSamples() || begin > 0)
         {
             fade.assign ((size_t) (end - begin), 1.0f);
-            if (end < sample.audio.getNumSamples())
+            if (end < sampleAudio.getNumSamples())
                 for (int i = 0, fadeLen = std::min (end - begin, (int) (lengthFadeSeconds * sample.sampleRate)); i < fadeLen; ++i)
                     fade[(size_t) (end - begin - 1 - i)] = (float) i / (float) fadeLen;
             if (begin > 0)
                 for (int i = 0, fadeLen = std::min (end - begin, (int) (startFadeSeconds * sample.sampleRate)); i < fadeLen; ++i)
                     fade[(size_t) i] *= (float) i / (float) fadeLen;
         }
-        addVoice (out, outputRate, hit.time / f, sample.audio, sample.sampleRate, begin, end, pitch, gain, fade.empty() ? nullptr : &fade);
+        addVoice (out, outputRate, hit.time / f, sampleAudio, sample.sampleRate, begin, end, pitch, gain, fade.empty() ? nullptr : &fade);
     }
 
     // Never clips: louder sounds than the original's add up, so the whole

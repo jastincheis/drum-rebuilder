@@ -1633,7 +1633,7 @@ public:
         auto s = processor.getRowSound (instrument);
         const bool backwards = processor.getReversed (instrument);
         const bool changed = (s == nullptr) != (sound == nullptr) || backwards != reversed
-                             || (s != nullptr && (s->file != sound->file || s->audio.getNumSamples() != sound->audio.getNumSamples()));
+                             || (s != nullptr && (s->file != sound->file || s->numSamples() != sound->numSamples()));
         sound = std::move (s);
         reversed = backwards;
         if (changed)
@@ -1655,7 +1655,7 @@ public:
         auto r = getLocalBounds().toFloat();
         g.setColour (theme::background);
         g.fillRoundedRectangle (r, 4.0f);
-        if (sound == nullptr || sound->audio.getNumSamples() == 0)
+        if (sound == nullptr || sound->getAudio().getNumSamples() == 0)
         {
             g.setColour (theme::textDim);
             g.setFont (juce::FontOptions (12.0f));
@@ -1666,15 +1666,15 @@ public:
         const float cutX = lengthX(), inX = startX();
         const auto colour = theme::instrument (instrument);
         // The visible stretch, one column per pixel.
-        const int total = sound->audio.getNumSamples(), columns = std::max (1, (int) w);
+        const int total = sound->getAudio().getNumSamples(), columns = std::max (1, (int) w);
         for (int k = 0; k < columns; ++k)
         {
             const double f0 = viewStart + (viewEnd - viewStart) * k / columns, f1 = viewStart + (viewEnd - viewStart) * (k + 1) / columns;
             const int a = juce::jlimit (0, total - 1, (int) (f0 * total));
             const int b = juce::jlimit (a + 1, total, (int) std::ceil (f1 * total));
             float m = 0.0f;
-            for (int ch = 0; ch < sound->audio.getNumChannels(); ++ch)
-                m = std::max (m, sound->audio.getMagnitude (ch, a, b - a));
+            for (int ch = 0; ch < sound->getAudio().getNumChannels(); ++ch)
+                m = std::max (m, sound->getAudio().getMagnitude (ch, a, b - a));
             m = top > 0.0f ? m / top : 0.0f;
             const float x = x0 + (float) k;
             g.setColour (x > cutX || x < inX ? colour.withAlpha (0.18f) : colour.withAlpha (0.9f));
@@ -1824,7 +1824,7 @@ private:
     double viewStart = 0.0, viewEnd = 1.0;   // the part in view, 0..1 of the sound
     bool dragging = false, draggingIn = false, onHandle = false, draggingOut = false, reversed = false;
 
-    double soundSeconds() const { return sound != nullptr ? sound->audio.getNumSamples() / sound->sampleRate : 0.0; }
+    double soundSeconds() const { return sound != nullptr ? sound->getAudio().getNumSamples() / sound->sampleRate : 0.0; }
 
     // Down to about 2 ms across the whole view.
     double minSpan() const { return soundSeconds() > 0.0 ? juce::jlimit (0.0005, 1.0, 0.002 / soundSeconds()) : 1.0; }
@@ -1867,12 +1867,12 @@ private:
         drb::Sample cut;
         cut.sampleRate = sound->sampleRate;
         cut.file = sound->file;
-        const int all = sound->audio.getNumSamples();
+        const int all = sound->getAudio().getNumSamples();
         const int end = length > 0.0 ? juce::jlimit (1, all, (int) std::ceil (length * sound->sampleRate)) : all;
         const int begin = juce::jlimit (0, std::max (0, end - 1), (int) (start * sound->sampleRate));
-        cut.audio.setSize (sound->audio.getNumChannels(), end - begin);
-        for (int ch = 0; ch < sound->audio.getNumChannels(); ++ch)
-            cut.audio.copyFrom (ch, 0, sound->audio, ch, begin, end - begin);
+        cut.audio.setSize (sound->getAudio().getNumChannels(), end - begin);
+        for (int ch = 0; ch < sound->getAudio().getNumChannels(); ++ch)
+            cut.audio.copyFrom (ch, 0, sound->getAudio(), ch, begin, end - begin);
         if (end < all)
         {
             const int n = std::min (end - begin, (int) (0.015 * sound->sampleRate));
@@ -1923,8 +1923,8 @@ private:
         top = 0.0f;
         if (sound == nullptr)
             return;
-        for (int ch = 0; ch < sound->audio.getNumChannels(); ++ch)
-            top = std::max (top, sound->audio.getMagnitude (ch, 0, sound->audio.getNumSamples()));
+        for (int ch = 0; ch < sound->getAudio().getNumChannels(); ++ch)
+            top = std::max (top, sound->getAudio().getMagnitude (ch, 0, sound->getAudio().getNumSamples()));
     }
 };
 

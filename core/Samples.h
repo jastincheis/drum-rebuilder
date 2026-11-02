@@ -17,11 +17,25 @@
 namespace drb
 {
 
+struct LazyAudio;
+
 struct Sample
 {
     juce::File file;
-    juce::AudioBuffer<float> audio;   // 1 or 2 channels
+    // The sound itself (1 or 2 channels). Sounds made in memory (cuts, a
+    // reversed copy) have it here; the library's sounds are read from their
+    // file only when first needed and then kept: use getAudio().
+    juce::AudioBuffer<float> audio;
     double sampleRate = 44100.0;
+    int length = 0, channels = 0;     // the library's sounds know these without reading the file
+    bool loop = false;                // from the Loops folder: plays straight from its file
+    std::shared_ptr<LazyAudio> lazy;  // set for library sounds: getAudio() reads the file once
+
+    const juce::AudioBuffer<float>& getAudio() const;
+    int numSamples() const { return lazy != nullptr ? length : audio.getNumSamples(); }
+    int numChannels() const { return lazy != nullptr ? channels : audio.getNumChannels(); }
+    // A copy that has its own audio (to change it, e.g. reverse it).
+    Sample withOwnAudio() const;
     bool original = false;            // cut from a beat by Drum Rebuilder
     juce::String fromBeat;            // the beat's name, for originals
     float peak = 0.0f;                // loudest sample value
@@ -67,7 +81,11 @@ public:
     // change are kept from the last time. Only reads the disk, so it can run
     // on a copy on a background thread; `progress` (done, total) returns
     // false to stop, and then nothing changes and it returns false.
+    // What was learnt about every sound (level, pitch, length) is kept in
+    // an index file in the library folder, so the next rescan reads only
+    // new or changed files; the sounds themselves load when first used.
     bool rescan (const std::function<bool (int, int)>& progress = nullptr);
+    static juce::String indexFileName() { return ".drum-rebuilder-index.tsv"; }
     const std::vector<SamplePtr>& samples (Instrument i) const { return lists[(size_t) i]; }
     const std::vector<SamplePtr>& inFolder (int folder) const { return lists[(size_t) folder]; }
     int missingLinks() const { return missing; }   // linked files not found at the last rescan

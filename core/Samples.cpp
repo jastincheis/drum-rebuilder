@@ -5,11 +5,104 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include <algorithm>
+#include <mutex>
 #include <cmath>
 #include <map>
 
 namespace drb
 {
+
+struct LazyAudio
+{
+    std::mutex lock;
+    bool read = false;
+    juce::AudioBuffer<float> audio;
+};
+
+const juce::AudioBuffer<float>& Sample::getAudio() const
+{
+    if (lazy == nullptr)
+        return audio;
+    const std::scoped_lock hold (lazy->lock);
+    if (! lazy->read)
+    {
+        lazy->read = true;
+        juce::String error;
+        if (auto loaded = loadAudioFile (file, error, 10.0))   // drum hits: 10 s is plenty
+        {
+            lazy->audio = std::move (loaded->audio);
+            if (std::abs (loaded->sampleRate - sampleRate) > 0.5 && loaded->sampleRate > 0.0)
+                lazy->audio = resample (lazy->audio, loaded->sampleRate, sampleRate);   // the file changed since
+        }
+    }
+    return lazy->audio;
+}
+
+Sample Sample::withOwnAudio() const
+{
+    Sample copy = *this;
+    if (lazy != nullptr)
+    {
+        copy.audio = getAudio();
+        copy.lazy.reset();
+    }
+    return copy;
+}
+
+namespace
+{
+// One line of the index: what rescan() learnt about a file.
+struct IndexEntry
+{
+    juce::int64 modified = 0, bytes = 0;
+    double sampleRate = 0.0, seconds = 0.0;
+    int length = 0, channels = 0;
+    float peak = 0.0f, pitch = 0.0f;
+};
+
+juce::String indexKey (int folder, const juce::File& f)   { return juce::String (folder) + "\t" + f.getFullPathName(); }
+
+std::map<juce::String, IndexEntry> readIndex (const juce::File& file)
+{
+    std::map<juce::String, IndexEntry> index;
+    juce::StringArray lines;
+    lines.addLines (file.loadFileAsString());
+    if (lines.isEmpty() || lines[0] != "drum-rebuilder-index 1")
+        return index;
+    for (int i = 1; i < lines.size(); ++i)
+    {
+        const auto parts = juce::StringArray::fromTokens (lines[i], "\t", "");
+        if (parts.size() != 10)
+            continue;
+        IndexEntry e;
+        e.modified = parts[2].getLargeIntValue();
+        e.bytes = parts[3].getLargeIntValue();
+        e.sampleRate = parts[4].getDoubleValue();
+        e.length = parts[5].getIntValue();
+        e.channels = parts[6].getIntValue();
+        e.peak = parts[7].getFloatValue();
+        e.pitch = parts[8].getFloatValue();
+        e.seconds = parts[9].getDoubleValue();
+        index[parts[0] + "\t" + parts[1]] = e;
+    }
+    return index;
+}
+
+void writeIndex (const juce::File& file, const std::array<std::vector<SamplePtr>, numFolders>& lists)
+{
+    juce::MemoryOutputStream text;
+    text << "drum-rebuilder-index 1\n";
+    for (int folder = 0; folder < numFolders; ++folder)
+        for (const auto& s : lists[(size_t) folder])
+            text << folder << "\t" << s->file.getFullPathName() << "\t" << s->modified.toMilliseconds() << "\t" << s->bytes
+                 << "\t" << juce::String (s->sampleRate, 1) << "\t" << s->numSamples() << "\t" << s->numChannels()
+                 << "\t" << juce::String (s->peak, 6) << "\t" << juce::String (s->pitch, 3) << "\t" << juce::String (s->seconds, 4) << "\n";
+    juce::TemporaryFile temp (file);
+    if (temp.getFile().replaceWithData (text.getData(), text.getDataSize()))
+        temp.overwriteTargetFileWithTemporary();
+}
+} // namespace
+
 
 float estimatePitch (const juce::AudioBuffer<float>& audio, double sampleRate, Instrument instrument)
 {
@@ -129,6 +222,9 @@ bool SampleLibrary::rescan (const std::function<bool (int, int)>& progress)
     for (const auto& list : lists)
         for (const auto& s : list)
             before[s->file.getFullPathName()] = s;
+    // And what was learnt about them the last times (from the disk).
+    const auto indexFile = root.getChildFile (indexFileName());
+    const auto index = readIndex (indexFile);
 
     // First every folder's files, so the progress knows the total.
     std::array<juce::Array<juce::File>, numFolders> found;
@@ -167,7 +263,7 @@ bool SampleLibrary::rescan (const std::function<bool (int, int)>& progress)
     }
 
     std::array<std::vector<SamplePtr>, numFolders> fresh;
-    int done = 0;
+    int done = 0, fromIndex = 0;   // the index is written again only when something changed
     for (int folder = 0; folder < numFolders; ++folder)
     {
         auto& list = fresh[(size_t) folder];
@@ -183,8 +279,10 @@ bool SampleLibrary::rescan (const std::function<bool (int, int)>& progress)
             const bool linked = ! f.isAChildOf (dir);
             if (const auto it = before.find (f.getFullPathName()); it != before.end() && it->second->modified == modified
                                                                    && it->second->bytes == bytes && it->second->linked == linked
-                                                                   && (folder == loopsFolder) == (it->second->audio.getNumSamples() == 0))
+                                                                   && (folder == loopsFolder) == it->second->loop)
             {
+                if (index.count (indexKey (folder, f)) > 0)
+                    ++fromIndex;
                 list.push_back (it->second);
                 continue;
             }
@@ -194,7 +292,26 @@ bool SampleLibrary::rescan (const std::function<bool (int, int)>& progress)
             s->linked = linked;
             s->modified = modified;
             s->bytes = bytes;
-            if (folder == loopsFolder)
+            s->loop = folder == loopsFolder;
+            const auto known = index.find (indexKey (folder, f));
+            if (known != index.end() && known->second.modified == modified.toMilliseconds() && known->second.bytes == bytes
+                && (s->loop || (known->second.sampleRate > 0.0 && known->second.length > 0)))
+            {
+                // Known from the index: nothing to read now.
+                ++fromIndex;
+                const auto& e = known->second;
+                s->seconds = e.seconds;
+                if (! s->loop)
+                {
+                    s->sampleRate = e.sampleRate;
+                    s->length = e.length;
+                    s->channels = e.channels;
+                    s->peak = e.peak;
+                    s->pitch = e.pitch;
+                    s->lazy = std::make_shared<LazyAudio>();
+                }
+            }
+            else if (s->loop)
             {
                 // Loops play straight from the file; only how long they are.
                 s->seconds = fileSeconds (f);
@@ -203,16 +320,21 @@ bool SampleLibrary::rescan (const std::function<bool (int, int)>& progress)
             }
             else
             {
+                // New or changed: read once to learn its level and pitch; the
+                // sound itself loads again when it is used.
                 juce::String error;
                 auto loaded = loadAudioFile (f, error, 10.0);   // drum hits: 10 s is plenty
                 if (! loaded)
                     continue;
-                s->audio = std::move (loaded->audio);
+                const auto& audio = loaded->audio;
                 s->sampleRate = loaded->sampleRate;
-                s->seconds = s->audio.getNumSamples() / s->sampleRate;
-                s->peak = s->audio.getMagnitude (0, s->audio.getNumSamples());
+                s->length = audio.getNumSamples();
+                s->channels = audio.getNumChannels();
+                s->seconds = s->length / s->sampleRate;
+                s->peak = audio.getMagnitude (0, s->length);
                 if (folder < numInstruments)
-                    s->pitch = estimatePitch (s->audio, s->sampleRate, allInstruments[(size_t) folder]);
+                    s->pitch = estimatePitch (audio, s->sampleRate, allInstruments[(size_t) folder]);
+                s->lazy = std::make_shared<LazyAudio>();
             }
             const auto name = f.getFileNameWithoutExtension();
             s->original = ! linked && name.contains (originalsTag());
@@ -226,6 +348,8 @@ bool SampleLibrary::rescan (const std::function<bool (int, int)>& progress)
 
     lists = std::move (fresh);
     missing = stillThere;
+    if (root.isDirectory() && (fromIndex != total || (int) index.size() != fromIndex))
+        writeIndex (indexFile, lists);
     return true;
 }
 

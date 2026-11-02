@@ -416,6 +416,31 @@ void checkRebuild()
                  && saved[0]->file.getFileName() == "Test beat (original) 01.wav";
     check (ok, "original hits saved into the instrument folders, saving again replaces them");
 
+    // 4b. The index: a library read again (a new program run) knows every
+    // sound's level and pitch without reading the files, and each sound
+    // loads, the same as before, only when it is used.
+    {
+        SampleLibrary first (root);
+        first.rescan();
+        const auto indexFile = root.getChildFile (SampleLibrary::indexFileName());
+        SampleLibrary later (root);
+        later.rescan();
+        const auto& a = first.samples (Instrument::Kick);
+        const auto& b = later.samples (Instrument::Kick);
+        bool same = indexFile.existsAsFile() && ! a.empty() && a.size() == b.size();
+        for (size_t k = 0; same && k < a.size(); ++k)
+        {
+            same = b[k]->lazy != nullptr && std::abs (a[k]->peak - b[k]->peak) < 1.0e-5f
+                   && std::abs (a[k]->pitch - b[k]->pitch) < 1.0e-2f && a[k]->numSamples() == b[k]->numSamples();
+            const auto& x = a[k]->getAudio();
+            const auto& y = b[k]->getAudio();
+            same = same && x.getNumSamples() == y.getNumSamples() && x.getNumSamples() == b[k]->numSamples();
+            for (int i = 0; same && i < x.getNumSamples(); ++i)
+                same = x.getSample (0, i) == y.getSample (0, i);
+        }
+        check (same, "the library index: same levels, pitches and sounds without reading the files");
+    }
+
     // 5. The user's order: the last one put first, kept after reading the
     // folders again; a new sound comes after the ordered ones.
     {

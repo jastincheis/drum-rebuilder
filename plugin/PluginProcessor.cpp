@@ -380,7 +380,8 @@ void DrumRebuilderProcessor::endHitPreview()
 
 void DrumRebuilderProcessor::previewSample (const drb::Sample& sample)
 {
-    if (sample.audio.getNumSamples() == 0)   // a loop: it plays from its file
+    const auto& audio = sample.getAudio();   // a library sound: read now, the first time
+    if (sample.loop || audio.getNumSamples() == 0)   // a loop: it plays from its file
     {
         previewFile (sample.file);
         return;
@@ -391,7 +392,7 @@ void DrumRebuilderProcessor::previewSample (const drb::Sample& sample)
     previewPlayer.stop();
     previewTarget = juce::File();
     preview.reset();
-    previewPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::resample (sample.audio, sample.sampleRate, rate)));
+    previewPlayer.setSource (std::make_unique<juce::AudioBuffer<float>> (drb::resample (audio, sample.sampleRate, rate)));
     previewPlayer.setLoop (false, {});
     previewPlayer.setPositionSeconds (0.0);
     previewPlayer.play();
@@ -1668,7 +1669,7 @@ drb::SamplePtr DrumRebuilderProcessor::getRowSound (drb::Instrument inst) const
     auto s = getRowSoundForward (inst);
     if (s == nullptr || ! reversed[(size_t) inst])
         return s;
-    auto backwards = std::make_shared<drb::Sample> (*s);
+    auto backwards = std::make_shared<drb::Sample> (s->withOwnAudio());
     backwards->audio.reverse (0, backwards->audio.getNumSamples());
     return backwards;
 }
