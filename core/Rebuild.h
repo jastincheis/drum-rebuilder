@@ -36,6 +36,7 @@ struct InstrumentPlan
     double startAt = 0.0;          // where it starts (IN), seconds from its start: that part is skipped, and
                                    // what is left begins at the hit
     bool muted = false;            // not heard (the others' sounds stay the same)
+    bool reversed = false;         // played backwards (IN / OUT are on the reversed sound)
 };
 
 struct RebuildSettings

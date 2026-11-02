@@ -140,6 +140,32 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
             done[h] = true;
             continue;
         }
+        if (useOriginal && plan.reversed)
+        {
+            // Its own cut of the recording, backwards, starting at the hit.
+            done[h] = true;
+            auto [a, b] = range (h);
+            a = std::clamp ((int) std::floor (hit.sourceTime() * sr), a, b);   // from the hit, as the Drum Rack shows it
+            if (b - a < 4)
+                continue;
+            juce::AudioBuffer<float> backwards (src.getNumChannels(), b - a);
+            for (int ch = 0; ch < src.getNumChannels(); ++ch)
+            {
+                backwards.copyFrom (ch, 0, src, ch, a, b - a);
+                backwards.reverse (ch, 0, b - a);
+            }
+            // IN / OUT on the reversed sound, seconds from its start.
+            int to = b - a;
+            if (plan.maxLength > 0.0)
+                to = std::clamp ((int) std::ceil (plan.maxLength * sr), 4, b - a);
+            const int from = std::clamp ((int) std::floor (plan.startAt * sr), 0, std::max (0, to - 4));
+            std::vector<float> envelope ((size_t) (to - from));
+            const int tailFade = to < b - a ? (int) (lengthFadeSeconds * sr) : fadeOut;
+            for (int i = from; i < to; ++i)
+                envelope[(size_t) (i - from)] = gate (i, from, to, fadeIn, tailFade) * hit.soundGain();
+            addVoice (out, outputRate, hit.time / f, backwards, sr, from, to, 1.0, 1.0f, &envelope);
+            continue;
+        }
         if (useOriginal)
         {
             // Every original hit at this same moment: their cuts are the same
@@ -149,7 +175,7 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
             for (size_t g = h; g < hits.size() && hits[g].time < hit.time + 1.0e-9; ++g)
             {
                 const auto& p = settings.instruments[(size_t) hits[g].instrument];
-                if (! done[g] && ! p.muted && (p.mode == PickMode::Original || p.pool.empty())
+                if (! done[g] && ! p.muted && ! p.reversed && (p.mode == PickMode::Original || p.pool.empty())
                     && std::abs (hits[g].sourceTime() - hit.sourceTime()) < 1.0e-9)
                     group.push_back (g);
             }
@@ -207,7 +233,14 @@ juce::AudioBuffer<float> renderRebuild (const RebuildInput& input, const Rebuild
         if (plan.muted)
             continue;   // picked all the same, so Random / Round robin stay as they were
 
-        const auto& sample = *pool[(size_t) index];
+        const auto& picked = *pool[(size_t) index];
+        Sample backwardsSample;
+        if (plan.reversed)
+        {
+            backwardsSample = picked;
+            backwardsSample.audio.reverse (0, backwardsSample.audio.getNumSamples());
+        }
+        const auto& sample = plan.reversed ? backwardsSample : picked;
         const float target = refPeak[(size_t) hit.instrument] > 0.0f ? refPeak[(size_t) hit.instrument] * hit.velocity : hit.velocity;
         // Matched to the original's level, but a very quiet sound is not
         // blown up more than 2.5 times (it would bring its noise along).

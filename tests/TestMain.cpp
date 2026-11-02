@@ -203,6 +203,59 @@ void checkRebuild()
         check (snareDiff < 1.0e-6f, "muting one instrument leaves the others as they were");
     }
 
+    // 1a2. Reverse: a kick sound that rises plays falling, and the snares stay the same.
+    {
+        RebuildInput two;
+        two.audio = &beat.audio;
+        two.sampleRate = sr;
+        for (size_t i = 0; i < input.hits.size(); ++i)
+            if (input.hits[i].instrument == Instrument::Kick || input.hits[i].instrument == Instrument::Snare)
+            {
+                two.hits.push_back (input.hits[i]);
+                two.slices.push_back (input.slices[i]);
+            }
+        auto rising = std::make_shared<Sample>();
+        rising->sampleRate = sr;
+        rising->audio.setSize (1, 2000);
+        for (int k = 0; k < 2000; ++k)
+            rising->audio.setSample (0, k, 0.8f * (float) k / 2000.0f);
+        rising->peak = 0.8f;
+        RebuildSettings forward, backwards;
+        for (auto* st : { &forward, &backwards })
+        {
+            auto& plan = st->instruments[(size_t) Instrument::Kick];
+            plan.mode = PickMode::Fixed;
+            plan.pool = { rising };
+        }
+        backwards.instruments[(size_t) Instrument::Kick].reversed = true;
+        const auto fwd = renderRebuild (two, forward, sr, 0.0);
+        const auto rev = renderRebuild (two, backwards, sr, 0.0);
+        bool shapesOk = false;
+        float snareDiff = 0.0f;
+        for (const auto& h : two.hits)
+        {
+            const int a = (int) std::lround (h.time * sr);
+            if (h.instrument == Instrument::Kick && ! shapesOk)
+                shapesOk = std::abs (fwd.getSample (0, a + 1800)) > 5.0f * std::abs (fwd.getSample (0, a + 200))
+                        && std::abs (rev.getSample (0, a + 200)) > 5.0f * std::abs (rev.getSample (0, a + 1800));
+            else if (h.instrument == Instrument::Snare)
+                for (int k = a; k < a + (int) (0.01 * sr); ++k)
+                    snareDiff = std::max (snareDiff, std::abs (rev.getSample (0, k) - fwd.getSample (0, k)));
+        }
+        check (shapesOk, "a reversed sound plays backwards from the hit");
+        check (snareDiff < 1.0e-6f, "reversing one instrument leaves the others as they were");
+
+        RebuildSettings originalsBack;
+        originalsBack.instruments[(size_t) Instrument::Kick].reversed = true;
+        const auto orig = renderRebuild (two, RebuildSettings(), sr, 0.0);
+        const auto origRev = renderRebuild (two, originalsBack, sr, 0.0);
+        float diff = 0.0f;
+        for (int k = 0; k < orig.getNumSamples(); ++k)
+            diff = std::max (diff, std::abs (orig.getSample (0, k) - origRev.getSample (0, k)));
+        check (diff > 0.05f && origRev.getMagnitude (0, origRev.getNumSamples()) > 0.05f,
+               "reversing the original kicks changes them and they are still heard");
+    }
+
     // 1b. A kick moved by hand (MIDI editor) takes its sound along.
     {
         RebuildInput moved;

@@ -3,10 +3,26 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
+
+namespace
+{
+// The sounds read last time, kept while the program runs: a Drum Rebuilder
+// opened again (a new window, a new plugin instance) starts from them, and
+// its scan only reads what is new or changed. Message thread only.
+std::optional<drb::SampleLibrary>& lastLibrary()
+{
+    static std::optional<drb::SampleLibrary> library;
+    return library;
+}
+} // namespace
 
 DrumRebuilderProcessor::DrumRebuilderProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
+    // Shown at once; the scan below only checks it (same library folder only).
+    if (const auto& last = lastLibrary(); last.has_value() && last->getRoot() == library.getRoot())
+        library = *last;
     rescanLibrary();
 }
 
@@ -573,6 +589,7 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
             p->soundPos = 0;
             p->changing.fill (true);
             p->muted.fill (false);
+            p->reversed.fill (false);
             if (restoring && p->pendingRebuild.isValid())
             {
                 const auto& r = p->pendingRebuild;
@@ -582,6 +599,7 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
                 const auto files = juce::StringArray::fromTokens (r.getProperty ("fixed").toString(), "|", "");
                 const auto change = r.getProperty ("changing").toString();
                 const auto mutes = r.getProperty ("muted").toString();
+                const auto backwards = r.getProperty ("reversed").toString();
                 const auto lengths = juce::StringArray::fromTokens (r.getProperty ("lengths").toString(), " ", "");
                 for (int i = 0; i < drb::numInstruments && i < lengths.size(); ++i)
                     p->soundLengths[(size_t) i] = juce::jlimit (0.0, 10.0, lengths[i].getDoubleValue());
@@ -599,6 +617,8 @@ void DrumRebuilderProcessor::loadFile (const juce::File& file)
                         p->changing[(size_t) i] = change[i] != '0';
                     if (i < mutes.length())
                         p->muted[(size_t) i] = mutes[i] == '1';
+                    if (i < backwards.length())
+                        p->reversed[(size_t) i] = backwards[i] == '1';
                 }
             }
             p->pendingRebuild = {};
@@ -1393,6 +1413,7 @@ void DrumRebuilderProcessor::rescanLibrary()
             if (p == nullptr || generation != p->libraryGeneration)
                 return;
             p->library = std::move (*copy);
+            lastLibrary().emplace (p->library);
             p->libraryJob.reset();
             p->chooseDefaultSounds();
             p->requestRender();
@@ -1506,6 +1527,19 @@ void DrumRebuilderProcessor::setMuted (drb::Instrument i, bool on)
     if (muted[(size_t) i] == on)
         return;
     muted[(size_t) i] = on;
+    scheduleBeatMemory();
+    requestRender();
+    sendChangeMessage();
+}
+
+void DrumRebuilderProcessor::setReversed (drb::Instrument i, bool on)
+{
+    if (reversed[(size_t) i] == on)
+        return;
+    reversed[(size_t) i] = on;
+    // IN / OUT were on the sound the other way round: all of it again.
+    soundIns[(size_t) i] = 0.0;
+    soundLengths[(size_t) i] = 0.0;
     scheduleBeatMemory();
     requestRender();
     sendChangeMessage();
@@ -1631,6 +1665,16 @@ void DrumRebuilderProcessor::forgetRangesOfChangedRows (const std::array<juce::S
 
 drb::SamplePtr DrumRebuilderProcessor::getRowSound (drb::Instrument inst) const
 {
+    auto s = getRowSoundForward (inst);
+    if (s == nullptr || ! reversed[(size_t) inst])
+        return s;
+    auto backwards = std::make_shared<drb::Sample> (*s);
+    backwards->audio.reverse (0, backwards->audio.getNumSamples());
+    return backwards;
+}
+
+drb::SamplePtr DrumRebuilderProcessor::getRowSoundForward (drb::Instrument inst) const
+{
     if (pickModes[(size_t) inst] != drb::PickMode::Original)
     {
         if (auto s = getFixedSample (inst))
@@ -1734,6 +1778,7 @@ drb::RebuildSettings DrumRebuilderProcessor::makeRebuildSettings() const
         plan.maxLength = soundLengths[(size_t) i];
         plan.startAt = soundIns[(size_t) i];
         plan.muted = muted[(size_t) i];
+        plan.reversed = reversed[(size_t) i];
         if (plan.mode == drb::PickMode::Original)
             continue;
         plan.pool = getPool (i);
@@ -1933,19 +1978,21 @@ juce::ValueTree DrumRebuilderProcessor::makeBeatState() const
     }
 
     juce::ValueTree r ("Rebuild");
-    juce::String modes, change, mutes;
+    juce::String modes, change, mutes, backwards;
     juce::StringArray files;
     for (auto i : drb::allInstruments)
     {
         modes << (int) pickModes[(size_t) i];
         change << (changing[(size_t) i] ? "1" : "0");
         mutes << (muted[(size_t) i] ? "1" : "0");
+        backwards << (reversed[(size_t) i] ? "1" : "0");
         files.add (fixedFiles[(size_t) i].getFullPathName());
     }
     r.setProperty ("modes", modes, nullptr);
     r.setProperty ("fixed", files.joinIntoString ("|"), nullptr);
     r.setProperty ("changing", change, nullptr);
     r.setProperty ("muted", mutes, nullptr);
+    r.setProperty ("reversed", backwards, nullptr);
     r.setProperty ("keepPitch", keepPitch, nullptr);
     r.setProperty ("tempoFactor", tempoFactor, nullptr);
     juce::StringArray lengths;

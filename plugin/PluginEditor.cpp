@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include "Focus.h"
+#include "../core/AudioFile.h"
 #include "MidiEditorView.h"
 #include "Theme.h"
 
@@ -1614,24 +1615,33 @@ private:
 // IN (the left handle: what is before it is skipped, the rest starts at the
 // hit) to OUT (the right one: what is after it is cut, with a short fade).
 // Drag a handle (or near it); double-click = all of it again; click = hear
-// it as it plays now.
+// it as it plays now. The wheel zooms in around the mouse (Shift+wheel moves
+// along); dragging the sound itself takes it out as a WAV (into Adormis
+// Audio, a DAW, a folder...); right-click: Reverse.
 class SoundLengthView : public juce::Component,
                         public juce::SettableTooltipClient
 {
 public:
     SoundLengthView (DrumRebuilderProcessor& p, drb::Instrument i) : processor (p), instrument (i)
     {
-        setTooltip ("Which part of this sound plays at every hit: drag IN (left) and OUT (right). Double-click: all of it");
+        setTooltip ("Drag IN (left) / OUT (right); double-click: all of it. Wheel: zoom. "
+                    "Drag the sound out (into Adormis Audio...). Right-click: Reverse");
     }
 
     void update()
     {
         auto s = processor.getRowSound (instrument);
-        const bool changed = (s == nullptr) != (sound == nullptr)
+        const bool backwards = processor.getReversed (instrument);
+        const bool changed = (s == nullptr) != (sound == nullptr) || backwards != reversed
                              || (s != nullptr && (s->file != sound->file || s->audio.getNumSamples() != sound->audio.getNumSamples()));
         sound = std::move (s);
+        reversed = backwards;
         if (changed)
+        {
             buildPeaks();
+            viewStart = 0.0;
+            viewEnd = 1.0;
+        }
         if (! dragging)
         {
             length = processor.getSoundLength (instrument);
@@ -1645,7 +1655,7 @@ public:
         auto r = getLocalBounds().toFloat();
         g.setColour (theme::background);
         g.fillRoundedRectangle (r, 4.0f);
-        if (sound == nullptr || peaks.empty())
+        if (sound == nullptr || sound->audio.getNumSamples() == 0)
         {
             g.setColour (theme::textDim);
             g.setFont (juce::FontOptions (12.0f));
@@ -1655,28 +1665,42 @@ public:
         const float x0 = r.getX() + 2.0f, w = r.getWidth() - 4.0f, mid = r.getCentreY(), half = r.getHeight() * 0.45f;
         const float cutX = lengthX(), inX = startX();
         const auto colour = theme::instrument (instrument);
-        for (size_t k = 0; k < peaks.size(); ++k)
+        // The visible stretch, one column per pixel.
+        const int total = sound->audio.getNumSamples(), columns = std::max (1, (int) w);
+        for (int k = 0; k < columns; ++k)
         {
-            const float x = x0 + w * (float) k / (float) peaks.size();
+            const double f0 = viewStart + (viewEnd - viewStart) * k / columns, f1 = viewStart + (viewEnd - viewStart) * (k + 1) / columns;
+            const int a = juce::jlimit (0, total - 1, (int) (f0 * total));
+            const int b = juce::jlimit (a + 1, total, (int) std::ceil (f1 * total));
+            float m = 0.0f;
+            for (int ch = 0; ch < sound->audio.getNumChannels(); ++ch)
+                m = std::max (m, sound->audio.getMagnitude (ch, a, b - a));
+            m = top > 0.0f ? m / top : 0.0f;
+            const float x = x0 + (float) k;
             g.setColour (x > cutX || x < inX ? colour.withAlpha (0.18f) : colour.withAlpha (0.9f));
-            g.drawVerticalLine ((int) x, mid - peaks[k] * half, mid + peaks[k] * half + 1.0f);
+            g.drawVerticalLine ((int) x, mid - m * half, mid + m * half + 1.0f);
         }
         g.setColour (juce::Colours::black.withAlpha (0.35f));
-        if (length > 0.0)
-            g.fillRect (juce::Rectangle<float> (cutX, r.getY(), r.getRight() - cutX, r.getHeight()));
-        if (start > 0.0)
-            g.fillRect (juce::Rectangle<float> (r.getX(), r.getY(), inX - r.getX(), r.getHeight()));
-        // The handles: IN (tab at the bottom) and OUT (tab at the top).
+        if (length > 0.0 && cutX < r.getRight())
+            g.fillRect (juce::Rectangle<float> (std::max (r.getX(), cutX), r.getY(), r.getRight() - std::max (r.getX(), cutX), r.getHeight()));
+        if (start > 0.0 && inX > r.getX())
+            g.fillRect (juce::Rectangle<float> (r.getX(), r.getY(), std::min (r.getRight(), inX) - r.getX(), r.getHeight()));
+        // The handles: IN (tab at the bottom) and OUT (tab at the top), when in view.
         g.setColour (theme::accent);
         for (float x : { inX, cutX })
-            g.fillRect (juce::Rectangle<float> (x - 1.5f, r.getY(), 3.0f, r.getHeight()));
+            if (x >= r.getX() - 2.0f && x <= r.getRight() + 2.0f)
+                g.fillRect (juce::Rectangle<float> (x - 1.5f, r.getY(), 3.0f, r.getHeight()));
         g.fillRoundedRectangle (juce::Rectangle<float> (cutX - 5.0f, r.getY(), 10.0f, 8.0f), 2.0f);
         g.fillRoundedRectangle (juce::Rectangle<float> (inX - 5.0f, r.getBottom() - 8.0f, 10.0f, 8.0f), 2.0f);
 
         const double full = soundSeconds(), end = length > 0.0 && length < full ? length : full;
-        const auto text = start <= 0.0 && end >= full ? juce::String (full, 2) + " s  (all)"
-                                                     : juce::String (start, 2) + " - " + juce::String (end, 2) + " s  of  "
-                                                           + juce::String (full, 2) + " s";
+        auto text = start <= 0.0 && end >= full ? juce::String (full, 2) + " s  (all)"
+                                               : juce::String (start, 2) + " - " + juce::String (end, 2) + " s  of  "
+                                                     + juce::String (full, 2) + " s";
+        if (reversed)
+            text = "reversed   " + text;
+        if (viewEnd - viewStart < 0.999)
+            text << "   x" << juce::String (1.0 / (viewEnd - viewStart), 1);
         g.setFont (juce::FontOptions (11.5f, juce::Font::bold));
         const float tw = (float) juce::GlyphArrangement::getStringWidthInt (g.getCurrentFont(), text) + 10.0f;
         const auto label = juce::Rectangle<float> (r.getRight() - tw - 3.0f, r.getY() + 2.0f, tw, 15.0f);
@@ -1688,26 +1712,44 @@ public:
 
     void mouseMove (const juce::MouseEvent& e) override
     {
-        setMouseCursor (std::min (std::abs ((float) e.x - lengthX()), std::abs ((float) e.x - startX())) < 8.0f
-                            ? juce::MouseCursor::LeftRightResizeCursor
-                            : juce::MouseCursor::PointingHandCursor);
+        setMouseCursor (nearHandle ((float) e.x) ? juce::MouseCursor::LeftRightResizeCursor
+                                                 : juce::MouseCursor::DraggingHandCursor);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        draggingOut = false;
+        if (e.mods.isPopupMenu())
+        {
+            showMenu();
+            return;
+        }
         // The handle nearer the mouse (on top of each other: IN when below the middle).
         const float toIn = std::abs ((float) e.x - startX()), toOut = std::abs ((float) e.x - lengthX());
         draggingIn = toIn < toOut - 0.5f || (std::abs (toIn - toOut) <= 0.5f && e.y > getHeight() / 2);
-        dragging = sound != nullptr && std::min (toIn, toOut) < 8.0f;
+        onHandle = sound != nullptr && std::min (toIn, toOut) < 8.0f;
+        dragging = false;
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        if (sound == nullptr || (! dragging && e.getDistanceFromDragStart() < 3))
+        if (sound == nullptr || e.mods.isPopupMenu() || draggingOut)
+            return;
+        // Away from the handles: the sound itself goes out as a file.
+        if (! onHandle)
+        {
+            if (e.getDistanceFromDragStart() > 6)
+            {
+                draggingOut = true;
+                dragSoundOut();
+            }
+            return;
+        }
+        if (! dragging && e.getDistanceFromDragStart() < 3)
             return;
         dragging = true;
         const double full = soundSeconds(), end = length > 0.0 ? length : full;
-        const double t = juce::jlimit (0.0, full, full * (e.x - 2.0) / std::max (1.0, getWidth() - 4.0));
+        const double t = juce::jlimit (0.0, full, xToSeconds ((float) e.x));
         if (draggingIn)
             start = t <= full * 0.005 ? 0.0 : std::min (t, end - 0.01);
         else
@@ -1718,8 +1760,10 @@ public:
         repaint();
     }
 
-    void mouseUp (const juce::MouseEvent&) override
+    void mouseUp (const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu() || draggingOut)
+            return;
         if (dragging)
         {
             dragging = false;
@@ -1735,20 +1779,95 @@ public:
         processor.setSoundRange (instrument, 0.0, 0.0);
     }
 
+    // The wheel zooms in / out around the mouse; Shift+wheel (or a sideways
+    // swipe) moves along the sound.
+    void mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel) override
+    {
+        if (sound == nullptr)
+            return;
+        const double span = viewEnd - viewStart;
+        const bool along = e.mods.isShiftDown() || std::abs (wheel.deltaX) > std::abs (wheel.deltaY);
+        if (along)
+        {
+            const double d = (e.mods.isShiftDown() ? wheel.deltaY : -wheel.deltaX) * span * 0.5;
+            setView (viewStart - d, viewEnd - d);
+            return;
+        }
+        if (std::abs (wheel.deltaY) < 1.0e-4f)
+            return;
+        const double at = viewStart + span * juce::jlimit (0.0, 1.0, (e.x - 2.0) / std::max (1.0, getWidth() - 4.0));
+        const double factor = std::pow (wheel.deltaY > 0 ? 0.8 : 1.25, std::min (3.0, std::abs (wheel.deltaY) * 4.0));
+        const double newSpan = juce::jlimit (minSpan(), 1.0, span * factor);
+        const double f = (at - viewStart) / span;
+        setView (at - newSpan * f, at - newSpan * f + newSpan);
+    }
+
     // Plays the sound as long as it is set to.
     void listen()
     {
         if (sound == nullptr)
             return;
-        const int all = sound->audio.getNumSamples();
         if (start <= 0.0 && (length <= 0.0 || length >= soundSeconds()))
         {
             processor.previewSample (*sound);
             return;
         }
-        // IN to OUT, with the same short fades as in the beat.
+        processor.previewSample (cutSound());
+    }
+
+private:
+    DrumRebuilderProcessor& processor;
+    drb::Instrument instrument;
+    drb::SamplePtr sound;
+    float top = 0.0f;                     // the loudest sample, for the drawing
+    double length = 0.0, start = 0.0;     // OUT (0 = the end), IN (seconds)
+    double viewStart = 0.0, viewEnd = 1.0;   // the part in view, 0..1 of the sound
+    bool dragging = false, draggingIn = false, onHandle = false, draggingOut = false, reversed = false;
+
+    double soundSeconds() const { return sound != nullptr ? sound->audio.getNumSamples() / sound->sampleRate : 0.0; }
+
+    // Down to about 2 ms across the whole view.
+    double minSpan() const { return soundSeconds() > 0.0 ? juce::jlimit (0.0005, 1.0, 0.002 / soundSeconds()) : 1.0; }
+
+    void setView (double a, double b)
+    {
+        const double span = juce::jlimit (minSpan(), 1.0, b - a);
+        a = juce::jlimit (0.0, 1.0 - span, a);
+        viewStart = a;
+        viewEnd = a + span;
+        repaint();
+    }
+
+    float secondsToX (double t) const
+    {
+        const double full = soundSeconds();
+        const double f = full > 0.0 ? t / full : 0.0;
+        return 2.0f + (float) (getWidth() - 4) * (float) ((f - viewStart) / (viewEnd - viewStart));
+    }
+
+    double xToSeconds (float x) const
+    {
+        const double f = viewStart + (viewEnd - viewStart) * (x - 2.0) / std::max (1.0, getWidth() - 4.0);
+        return f * soundSeconds();
+    }
+
+    float startX() const { return secondsToX (std::min (start, soundSeconds())); }
+
+    float lengthX() const
+    {
+        const double full = soundSeconds();
+        return secondsToX (length > 0.0 && full > 0.0 ? std::min (length, full) : full);
+    }
+
+    bool nearHandle (float x) const   { return std::min (std::abs (x - lengthX()), std::abs (x - startX())) < 8.0f; }
+
+    // IN to OUT, with the same short fades as in the beat.
+    drb::Sample cutSound() const
+    {
         drb::Sample cut;
         cut.sampleRate = sound->sampleRate;
+        cut.file = sound->file;
+        const int all = sound->audio.getNumSamples();
         const int end = length > 0.0 ? juce::jlimit (1, all, (int) std::ceil (length * sound->sampleRate)) : all;
         const int begin = juce::jlimit (0, std::max (0, end - 1), (int) (start * sound->sampleRate));
         cut.audio.setSize (sound->audio.getNumChannels(), end - begin);
@@ -1761,51 +1880,51 @@ public:
         }
         if (begin > 0)
             cut.audio.applyGainRamp (0, std::min (end - begin, (int) (0.002 * sound->sampleRate)), 0.0f, 1.0f);
-        processor.previewSample (cut);
+        return cut;
     }
 
-private:
-    DrumRebuilderProcessor& processor;
-    drb::Instrument instrument;
-    drb::SamplePtr sound;
-    std::vector<float> peaks;
-    double length = 0.0, start = 0.0;   // OUT (0 = the end), IN (seconds)
-    bool dragging = false, draggingIn = false;
-
-    double soundSeconds() const { return sound != nullptr ? sound->audio.getNumSamples() / sound->sampleRate : 0.0; }
-
-    float startX() const
+    // The sound as it plays now (IN to OUT, reversed or not) written to
+    // Music/Drum Rebuilder Sounds and dragged out as that file: Adormis Audio
+    // opens it, a DAW or a folder takes it.
+    void dragSoundOut()
     {
-        const double full = soundSeconds();
-        return 2.0f + (float) (getWidth() - 4) * (float) (full > 0.0 ? std::min (start, full) / full : 0.0);
+        const auto cut = cutSound();
+        if (cut.audio.getNumSamples() == 0)
+            return;
+        const auto folder = juce::File::getSpecialLocation (juce::File::userMusicDirectory).getChildFile ("Drum Rebuilder Sounds");
+        if (! folder.createDirectory())
+            return;
+        auto name = juce::String (drb::instrumentName (instrument));
+        if (sound->file != juce::File())
+            name << " - " << sound->file.getFileNameWithoutExtension();
+        else
+            name << " - original";
+        if (reversed)
+            name << " (reversed)";
+        const auto file = folder.getNonexistentChildFile (juce::File::createLegalFileName (name), ".wav", false);
+        if (! drb::writeWav (file, cut.audio, cut.sampleRate))
+            return;
+        juce::DragAndDropContainer::performExternalDragDropOfFiles ({ file.getFullPathName() }, false, this);
     }
 
-    float lengthX() const
+    void showMenu()
     {
-        const double full = soundSeconds();
-        const double l = length > 0.0 && full > 0.0 ? std::min (length, full) : full;
-        return 2.0f + (float) (getWidth() - 4) * (float) (full > 0.0 ? l / full : 1.0);
+        if (sound == nullptr)
+            return;
+        juce::PopupMenu menu;
+        menu.addItem ("Reverse", true, reversed, [this] { processor.setReversed (instrument, ! reversed); });
+        menu.addItem ("Zoom out (all of it)", viewEnd - viewStart < 0.999, false, [this] { setView (0.0, 1.0); });
+        menu.addItem ("Listen", [this] { listen(); });
+        menu.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this).withMousePosition(), focus::afterMenu (this));
     }
 
     void buildPeaks()
     {
-        peaks.clear();
+        top = 0.0f;
         if (sound == nullptr)
             return;
-        const int n = 300, total = sound->audio.getNumSamples();
-        float top = 0.0f;
-        for (int k = 0; k < n; ++k)
-        {
-            const int a = (int) ((juce::int64) total * k / n), b = std::max (a + 1, (int) ((juce::int64) total * (k + 1) / n));
-            float m = 0.0f;
-            for (int ch = 0; ch < sound->audio.getNumChannels(); ++ch)
-                m = std::max (m, sound->audio.getMagnitude (ch, a, std::min (b, total) - a));
-            peaks.push_back (m);
-            top = std::max (top, m);
-        }
-        if (top > 0.0f)
-            for (auto& p : peaks)
-                p /= top;
+        for (int ch = 0; ch < sound->audio.getNumChannels(); ++ch)
+            top = std::max (top, sound->audio.getMagnitude (ch, 0, sound->audio.getNumSamples()));
     }
 };
 

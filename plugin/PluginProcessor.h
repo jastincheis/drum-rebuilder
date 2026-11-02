@@ -220,6 +220,10 @@ public:
     // Muted: left out of the rebuilt beat (B) and its export.
     bool getMuted (drb::Instrument i) const { return muted[(size_t) i]; }
     void setMuted (drb::Instrument, bool);
+    // Reversed: the instrument's sound plays backwards (in B, its export and
+    // the Drum Rack row). Saved with the beat.
+    bool getReversed (drb::Instrument i) const { return reversed[(size_t) i]; }
+    void setReversed (drb::Instrument, bool);
     // Forward: the next sounds already heard, else new ones at random for
     // the ticked instruments. Back: the sounds before.
     void nextSounds();
@@ -312,6 +316,8 @@ private:
     std::array<juce::File, drb::numInstruments> fixedFiles;
     std::array<bool, drb::numInstruments> changing = [] { std::array<bool, drb::numInstruments> a; a.fill (true); return a; }();
     std::array<bool, drb::numInstruments> muted {};
+    std::array<bool, drb::numInstruments> reversed {};
+    drb::SamplePtr getRowSoundForward (drb::Instrument) const;
     struct SoundSet
     {
         std::array<drb::PickMode, drb::numInstruments> modes;
